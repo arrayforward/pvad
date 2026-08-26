@@ -1,0 +1,185 @@
+{
+ "config": {
+  "train_dir": "data/mixtures_v3/train",
+  "val_dir": "data/mixtures_v3/val",
+  "out_dir": "D:\\ai-app\\double-voice\\models\\pvad",
+  "epochs": 15,
+  "batch": 32,
+  "lr": 0.001,
+  "target_weight": 3.0,
+  "weight1": 2.0,
+  "max_train": 0,
+  "workers": 4,
+  "ckpt_name": "best_v3.pt",
+  "log_name": "train_log_v3.json",
+  "cond": "film"
+ },
+ "n_params": 260387,
+ "epochs": [
+  {
+   "epoch": 1,
+   "train_loss": 0.44107,
+   "elapsed_s": 814.8,
+   "val_loss": 0.97014,
+   "val_acc": 0.82172,
+   "val_target_recall": 0.9657,
+   "val_target_precision": 0.82146,
+   "val_target_f1": 0.88776,
+   "val_far": 0.54407
+  },
+  {
+   "epoch": 2,
+   "train_loss": 0.37233,
+   "elapsed_s": 792.9,
+   "val_loss": 0.90124,
+   "val_acc": 0.83531,
+   "val_target_recall": 0.96523,
+   "val_target_precision": 0.83325,
+   "val_target_f1": 0.8944,
+   "val_far": 0.49777
+  },
+  {
+   "epoch": 3,
+   "train_loss": 0.3372,
+   "elapsed_s": 619.2,
+   "val_loss": 0.83729,
+   "val_acc": 0.84762,
+   "val_target_recall": 0.97586,
+   "val_target_precision": 0.8398,
+   "val_target_f1": 0.90273,
+   "val_far": 0.48051
+  },
+  {
+   "epoch": 4,
+   "train_loss": 0.31071,
+   "elapsed_s": 731.2,
+   "val_loss": 0.83393,
+   "val_acc": 0.85147,
+   "val_target_recall": 0.96538,
+   "val_target_precision": 0.84992,
+   "val_target_f1": 0.90398,
+   "val_far": 0.43961
+  },
+  {
+   "epoch": 5,
+   "train_loss": 0.2917,
+   "elapsed_s": 707.7,
+   "val_loss": 0.85979,
+   "val_acc": 0.84762,
+   "val_target_recall": 0.94557,
+   "val_target_precision": 0.85864,
+   "val_target_f1": 0.90001,
+   "val_far": 0.40217
+  },
+  {
+   "epoch": 6,
+   "train_loss": 0.27126,
+   "elapsed_s": 841.3,
+   "val_loss": 0.84416,
+   "val_acc": 0.84708,
+   "val_target_recall": 0.97818,
+   "val_target_precision": 0.83727,
+   "val_target_f1": 0.90225,
+   "val_far": 0.48926
+  },
+  {
+   "epoch": 7,
+   "train_loss": 0.25733,
+   "elapsed_s": 656.0,
+   "val_loss": 0.92288,
+   "val_acc": 0.84338,
+   "val_target_recall": 0.93274,
+   "val_target_precision": 0.86289,
+   "val_target_f1": 0.89646,
+   "val_far": 0.3832
+  },
+  {
+   "epoch": 8,
+   "train_loss": 0.23888,
+   "elapsed_s": 651.5,
+   "val_loss": 0.88226,
+   "val_acc": 0.85039,
+   "val_target_recall": 0.95918,
+   "val_target_precision": 0.85302,
+   "val_target_f1": 0.90299,
+   "val_far": 0.42551
+  },
+  {
+   "epoch": 9,
+   "train_loss": 0.22351,
+   "elapsed_s": 663.2,
+   "val_loss": 0.91105,
+   "val_acc": 0.84428,
+   "val_target_recall": 0.96591,
+   "val_target_precision": 0.84236,
+   "val_target_f1": 0.89991,
+   "val_far": 0.46832
+  },
+  {
+   "epoch": 10,
+   "train_loss": 0.20916,
+   "elapsed_s": 656.5,
+   "val_loss": 0.94942,
+   "val_acc": 0.8484,
+   "val_target_recall": 0.9517,
+   "val_target_precision": 0.85559,
+   "val_target_f1": 0.90109,
+   "val_far": 0.41697
+  },
+  {
+   "epoch": 11,
+   "train_loss": 0.20362,
+   "elapsed_s": 661.4,
+   "val_loss": 1.03095,
+   "val_acc": 0.84563,
+   "val_target_recall": 0.92732,
+   "val_target_precision": 0.86874,
+   "val_target_f1": 0.89707,
+   "val_far": 0.35939
+  },
+  {
+   "epoch": 12,
+   "train_loss": 0.19561,
+   "elapsed_s": 668.0,
+   "val_loss": 1.1156,
+   "val_acc": 0.8375,
+   "val_target_recall": 0.89986,
+   "val_target_precision": 0.87982,
+   "val_target_f1": 0.88973,
+   "val_far": 0.31665
+  },
+  {
+   "epoch": 13,
+   "train_loss": 0.1875,
+   "elapsed_s": 687.4,
+   "val_loss": 1.04674,
+   "val_acc": 0.83948,
+   "val_target_recall": 0.94152,
+   "val_target_precision": 0.85261,
+   "val_target_f1": 0.89486,
+   "val_far": 0.4199
+  },
+  {
+   "epoch": 14,
+   "train_loss": 0.18082,
+   "elapsed_s": 870.8,
+   "val_loss": 1.01471,
+   "val_acc": 0.84669,
+   "val_target_recall": 0.96155,
+   "val_target_precision": 0.84703,
+   "val_target_f1": 0.90066,
+   "val_far": 0.44737
+  },
+  {
+   "epoch": 15,
+   "train_loss": 0.16958,
+   "elapsed_s": 689.2,
+   "val_loss": 1.07785,
+   "val_acc": 0.84786,
+   "val_target_recall": 0.94662,
+   "val_target_precision": 0.85901,
+   "val_target_f1": 0.90069,
+   "val_far": 0.40354
+  }
+ ]
+}

@@ -1,0 +1,15 @@
+# 训练大数据（语料/混合物/原始包，~110G，获取方法见 TRAINING.md）
+data/
+# 构建产物
+build/
+qt_demo/build/
+# Python 环境（可由 requirements.txt 重建）
+.venv/
+__pycache__/
+*.pyc
+# 大体积预编译二进制（下载命令见 docs/USAGE.md「第三方依赖」）
+third_party/onnxruntime/
+third_party/sherpa-onnx/
+
+# qt_demo 录音产物
+qt_demo/recordings/

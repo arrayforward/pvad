@@ -1,0 +1,78 @@
+# -*- coding: utf-8 -*-
+"""预计算混合物 fbank 和 enrollment 的 CAM++ embedding。
+
+用法: python scripts/precompute_features.py --dir data/mixtures/val [--workers 8]
+输出: <dir>/feats/<id>.npy  ([T,80] float32, per-utterance 均值归一化)
+      <dir>/emb/<id>.npy    ([192] float32, L2 归一化)
+"""
+import argparse
+import os
+import sys
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pvad_common import ROOT, fbank, mean_normalize, load_labels  # noqa: E402
+
+_EMBEDDER = None
+
+
+def _get_embedder():
+    global _EMBEDDER
+    if _EMBEDDER is None:
+        from pvad_common import CampplusEmbedder
+        _EMBEDDER = CampplusEmbedder(intra_threads=1)
+    return _EMBEDDER
+
+
+def process_one(args):
+    uid, mix_path, enroll_path, feat_out, emb_out = args
+    try:
+        if not Path(feat_out).exists():
+            from pvad_common import read_wav
+            pcm, sr = read_wav(ROOT / mix_path)
+            feats = mean_normalize(fbank(pcm))
+            np.save(feat_out, feats.astype(np.float32))
+        if not Path(emb_out).exists():
+            from pvad_common import read_wav
+            pcm, sr = read_wav(ROOT / enroll_path)
+            emb = _get_embedder().embed(pcm)
+            np.save(emb_out, emb.astype(np.float32))
+        return uid, None
+    except Exception as e:  # noqa: BLE001
+        return uid, str(e)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dir", required=True)
+    ap.add_argument("--workers", type=int, default=8)
+    args = ap.parse_args()
+
+    d = Path(args.dir).resolve()
+    recs = load_labels(d / "labels.jsonl")
+    (d / "feats").mkdir(exist_ok=True)
+    (d / "emb").mkdir(exist_ok=True)
+    tasks = [(r["id"], r["path"], r["enrollment"],
+              str(d / "feats" / f"{r['id']}.npy"),
+              str(d / "emb" / f"{r['id']}.npy")) for r in recs]
+    print(f"{d.name}: {len(tasks)} 条待预计算")
+    errs = 0
+    done = 0
+    with ProcessPoolExecutor(max_workers=args.workers) as ex:
+        for uid, err in ex.map(process_one, tasks, chunksize=16):
+            done += 1
+            if err:
+                errs += 1
+                if errs <= 5:
+                    print(f"  [错误] {uid}: {err}")
+            if done % 500 == 0:
+                print(f"  进度 {done}/{len(tasks)}")
+    print(f"完成 {done - errs}/{len(tasks)}, 失败 {errs}")
+    return 1 if errs else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

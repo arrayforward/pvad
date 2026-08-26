@@ -1,0 +1,12 @@
+# PVAD 训练环境直接依赖 (Python 3.12, Windows/Linux CPU)
+# 安装: pip install -r requirements.txt
+# 注意: torch CPU 版需先从官方索引安装 (PyPI 上的 torch 是 CUDA 捆绑版, ~2.4GB):
+#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
+onnxruntime==1.29.0
+onnx==1.22.0
+onnxscript==0.7.1
+numpy==2.5.2
+scipy==1.18.1
+soundfile==0.14.0
+pyarrow==25.0.1

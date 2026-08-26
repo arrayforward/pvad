@@ -1,0 +1,105 @@
+{
+ "config": {
+  "train_dir": "D:\\ai-app\\double-voice\\data\\mixtures\\train",
+  "val_dir": "D:\\ai-app\\double-voice\\data\\mixtures\\val",
+  "out_dir": "D:\\ai-app\\double-voice\\models\\pvad",
+  "epochs": 8,
+  "batch": 32,
+  "lr": 0.001,
+  "target_weight": 3.0,
+  "weight1": 2.0,
+  "max_train": 12000,
+  "workers": 4
+ },
+ "n_params": 253827,
+ "epochs": [
+  {
+   "epoch": 1,
+   "train_loss": 0.3456,
+   "elapsed_s": 587.3,
+   "val_loss": 0.69923,
+   "val_acc": 0.88306,
+   "val_target_recall": 0.9444,
+   "val_target_precision": 0.90392,
+   "val_target_f1": 0.92372,
+   "val_far": 0.32933
+  },
+  {
+   "epoch": 2,
+   "train_loss": 0.2499,
+   "elapsed_s": 510.4,
+   "val_loss": 0.58185,
+   "val_acc": 0.89447,
+   "val_target_recall": 0.98285,
+   "val_target_precision": 0.88816,
+   "val_target_f1": 0.93311,
+   "val_far": 0.40574
+  },
+  {
+   "epoch": 3,
+   "train_loss": 0.21304,
+   "elapsed_s": 475.3,
+   "val_loss": 0.56603,
+   "val_acc": 0.89667,
+   "val_target_recall": 0.98895,
+   "val_target_precision": 0.88529,
+   "val_target_f1": 0.93425,
+   "val_far": 0.41962
+  },
+  {
+   "epoch": 4,
+   "train_loss": 0.18946,
+   "elapsed_s": 383.9,
+   "val_loss": 0.54986,
+   "val_acc": 0.90732,
+   "val_target_recall": 0.95489,
+   "val_target_precision": 0.92437,
+   "val_target_f1": 0.93939,
+   "val_far": 0.25662
+  },
+  {
+   "epoch": 5,
+   "train_loss": 0.18234,
+   "elapsed_s": 379.4,
+   "val_loss": 0.50909,
+   "val_acc": 0.9115,
+   "val_target_recall": 0.9701,
+   "val_target_precision": 0.91626,
+   "val_target_f1": 0.94241,
+   "val_far": 0.29016
+  },
+  {
+   "epoch": 6,
+   "train_loss": 0.16929,
+   "elapsed_s": 391.2,
+   "val_loss": 0.52938,
+   "val_acc": 0.91073,
+   "val_target_recall": 0.95957,
+   "val_target_precision": 0.92406,
+   "val_target_f1": 0.94148,
+   "val_far": 0.25782
+  },
+  {
+   "epoch": 7,
+   "train_loss": 0.15592,
+   "elapsed_s": 436.3,
+   "val_loss": 0.48465,
+   "val_acc": 0.91487,
+   "val_target_recall": 0.98381,
+   "val_target_precision": 0.90962,
+   "val_target_f1": 0.94527,
+   "val_far": 0.31939
+  },
+  {
+   "epoch": 8,
+   "train_loss": 0.14587,
+   "elapsed_s": 403.6,
+   "val_loss": 0.51396,
+   "val_acc": 0.91448,
+   "val_target_recall": 0.98439,
+   "val_target_precision": 0.90817,
+   "val_target_f1": 0.94475,
+   "val_far": 0.32723
+  }
+ ]
+}
