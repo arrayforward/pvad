@@ -10,10 +10,11 @@ TTS 时**只有已注册用户 A 的语音可以打断播放**——TTS 自身�
   以注册 embedding 为条件做 10ms 帧级三分类（静音/非目标/目标），双讲场景帧级识别
 - **无 AEC 设计**：不依赖回声参考信号（规避播放/采集时钟对齐难题），抗回声由
   PVAD/负模板门控内生解决（SpeexDSP AEC 保留为可选 `--aec`）
-- **可选实时降噪（RNNoise）**：vendor xiph/rnnoise 源码编入，16k↔48k 双向重采样
-  （speex_resampler），`--denoise rnnoise` / qt_demo 勾选启用，默认关
-  （A/B 实测结论见 [docs/DESIGN.md](docs/DESIGN.md) 第 7 节——对白噪收益有限且
-  个别场景退化，仅建议持续底噪的干净会议室场景手动开）
+- **实时降噪（RNNoise，默认开）**：vendor xiph/rnnoise 源码编入，16k↔48k 双向重采样
+  （speex_resampler），CLI `--denoise rnnoise|off`（默认 `rnnoise`）、qt_demo `[启用降噪]`
+  默认勾选。**回滚方式**：①运行时 `--denoise off` / 取消勾选；②代码级
+  `git revert` 默认开那次 commit。已知边缘场景：SAPI 合成音+SNR10 白噪下 A 可能漏触发、
+  真实人声混合物开/关无差异（A/B 数据见 [docs/DESIGN.md](docs/DESIGN.md) 第 7 节）
 - **AS-norm 门控基线**：CAM++ embedding + cohort t-norm 归一化 + 负模板 margin 判决，
   完整保留用于对照实验（`--gate asnorm`）
 - **三种模型版本**：pvad.onnx (v1) / pvad_v2.onnx (增广) / pvad_v3.onnx (FiLM，默认)，

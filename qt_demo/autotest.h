@@ -2,8 +2,8 @@
 #pragma once
 #include <string>
 
-// 返回 0 = 全部 PASS，1 = 有 FAIL
-int run_auto_test(const std::string& root, const std::string& tts_model_dir);
+// 返回 0 = 全部 PASS，1 = 有 FAIL；use_denoise 默认 true（与 CLI/GUI 默认开一致）
+int run_auto_test(const std::string& root, const std::string& tts_model_dir, bool use_denoise = true);
 
 // 录音注册代码路径冒烟：默认麦克风录 seconds 秒 -> 存 wav -> CAM++ 注册
 int run_record_test(const std::string& root, int seconds);

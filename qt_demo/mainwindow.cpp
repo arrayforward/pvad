@@ -181,6 +181,7 @@ MainWindow::MainWindow() {
     connect(denoise_box_, &QCheckBox::toggled, this, [this](bool on) {
         QMetaObject::invokeMethod(engine_, "setDenoiseEnabled", Qt::QueuedConnection, Q_ARG(bool, on));
     });
+    denoise_box_->setChecked(true);  // 降噪默认开（触发 toggled -> engine 创建 Denoise）
 
     connect(engine_, &Engine::logLine, this, &MainWindow::log);
     connect(engine_, &Engine::enrollStatus, enroll_label_, &QLabel::setText);

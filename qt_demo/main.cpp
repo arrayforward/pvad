@@ -71,9 +71,12 @@ int main(int argc, char** argv) {
     if (args.contains("--auto-test")) {
         std::string root = DEMO_ROOT;
         std::string tts_dir = TTS_MODEL_DIR;
+        bool use_denoise = true;
         int idx = args.indexOf("--tts-model");
         if (idx >= 0 && idx + 1 < args.size()) tts_dir = args[idx + 1].toStdString();
-        return run_auto_test(root, tts_dir);
+        int di = args.indexOf("--denoise");
+        if (di >= 0 && di + 1 < args.size()) use_denoise = (args[di + 1] != "off");
+        return run_auto_test(root, tts_dir, use_denoise);
     }
 
     QApplication app(argc, argv);

@@ -3,6 +3,7 @@
 #include <rnnoise.h>
 #include <speex/speex_resampler.h>
 #include <stdexcept>
+#include <cstdio>
 
 Denoise::Denoise() {
     int err = 0;

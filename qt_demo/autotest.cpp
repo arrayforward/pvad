@@ -5,13 +5,15 @@
 //         虚拟播放在触发时刻被停止; 再注入 voice2(非注册)，预期不触发
 #include "autotest.h"
 #include "demo_core.h"
+#include "denoise.h"
 #include "tts.h"
 #include "wav_io.h"
 #include "wizard.h"
-#include <cstdio>
 #include <chrono>
+#include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -25,13 +27,17 @@ struct FeedResult {
     double first_interrupt_t = -1.0;
 };
 
-FeedResult feed(DemoCore& core, const std::vector<float>& pcm, float gain = 1.0f) {
+FeedResult feed(DemoCore& core, const std::vector<float>& pcm, float gain = 1.0f,
+                Denoise* denoise = nullptr) {
     FeedResult r;
     size_t n = pcm.size() / 160;
     for (size_t i = 0; i < n; i++) {
         float frame[160];
         for (int j = 0; j < 160; j++) frame[j] = pcm[i * 160 + j] * gain;
-        FrameEvent ev = core.feed_frame(frame);
+        const float* src = frame;
+        float dn[160];
+        if (denoise) { denoise->process(frame, dn); src = dn; }
+        FrameEvent ev = core.feed_frame(src);
         if (ev.p > r.max_p) r.max_p = ev.p;
         if (ev.interrupt) {
             r.interrupts++;
@@ -41,11 +47,30 @@ FeedResult feed(DemoCore& core, const std::vector<float>& pcm, float gain = 1.0f
     return r;
 }
 
+// 整段预降噪（与 CLI run_offline 一致：保证 PVAD 整段预计算作用在干净信号上）
+std::vector<float> pre_denoise(const std::vector<float>& pcm, Denoise& d) {
+    std::vector<float> out(pcm.size());
+    size_t n = pcm.size() / 160;
+    for (size_t i = 0; i < n; i++) d.process(&pcm[i * 160], &out[i * 160]);
+    return out;
+}
+
 }  // namespace
 
-int run_auto_test(const std::string& root, const std::string& tts_model_dir) {
+int run_auto_test(const std::string& root, const std::string& tts_model_dir, bool use_denoise) {
     int fails = 0;
     std::string err;
+
+    // 降噪默认开（与 CLI/GUI 默认值一致）；--denoise off 可关（回滚/对比用）
+    std::unique_ptr<Denoise> denoise;
+    if (use_denoise) {
+        try {
+            denoise = std::make_unique<Denoise>();
+        } catch (const std::exception& e) {
+            printf("[auto-test] denoise init failed (%s), continue without denoise\n", e.what());
+        }
+    }
+    printf("[auto-test] denoise=%s\n", denoise ? "rnnoise" : "off");
 
     DemoCore core;
     if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v3.onnx", err)) {
@@ -97,6 +122,7 @@ int run_auto_test(const std::string& root, const std::string& tts_model_dir) {
         core.reset_stream();
         std::vector<float> gained(tts_pcm.size());
         for (size_t i = 0; i < tts_pcm.size(); i++) gained[i] = tts_pcm[i] * 0.6f;
+        if (denoise) gained = pre_denoise(gained, *denoise);  // 预降噪（与 CLI 离线一致）
         if (!core.precompute_file(gained.data(), gained.size(), err)) {
             printf("[auto-test] precompute failed: %s\n", err.c_str());
             return 1;
@@ -113,16 +139,18 @@ int run_auto_test(const std::string& root, const std::string& tts_model_dir) {
     for (const char* name : {"voice1b", "voice2"}) {
         core.reset_stream();
         WavData wd = read_wav(root + "/test_audio/" + name + ".wav");
-        if (!core.precompute_file(wd.samples.data(), wd.samples.size(), err)) {
+        std::vector<float> samples = denoise ? pre_denoise(wd.samples, *denoise)
+                                             : std::move(wd.samples);
+        if (!core.precompute_file(samples.data(), samples.size(), err)) {
             printf("[auto-test] precompute failed: %s\n", err.c_str());
             return 1;
         }
         bool playing = true;
         double stop_t = -1.0;
         FeedResult r;
-        size_t n = wd.samples.size() / 160;
+        size_t n = samples.size() / 160;
         for (size_t i = 0; i < n; i++) {
-            FrameEvent ev = core.feed_frame(&wd.samples[i * 160]);
+            FrameEvent ev = core.feed_frame(&samples[i * 160]);
             if (ev.p > r.max_p) r.max_p = ev.p;
             if (ev.interrupt) {
                 r.interrupts++;

@@ -294,13 +294,15 @@ void rnn_pitch_search(const opus_val16 *x_lp, opus_val16 *y,
    celt_assert(max_pitch>0);
    lag = len+max_pitch;
 
-   /* MSVC 不支持 C99 VLA，改定长数组（上限来自 PITCH_FRAME_SIZE=960 / PITCH_MAX_PERIOD=768） */
+   /* MSVC 不支持 C99 VLA，改定长数组。
+      调用点 denoise.c: rnn_pitch_search(..., PITCH_FRAME_SIZE=960,
+      PITCH_MAX_PERIOD-3*PITCH_MIN_PERIOD=588, ...) */
    opus_val16 x_lp4[256];   /* len>>2 上限 240 */
-   opus_val16 y_lp4[352];   /* (len+max_pitch)>>2 上限 336 */
-   opus_val32 xcorr[256];   /* max_pitch>>1 上限 192 */
+   opus_val16 y_lp4[400];   /* (len+max_pitch)>>2 上限 (960+588)>>2 = 387 */
+   opus_val32 xcorr[320];   /* max_pitch>>1 上限 294 */
    celt_assert((len>>2) <= 256);
-   celt_assert((lag>>2) <= 352);
-   celt_assert((max_pitch>>1) <= 256);
+   celt_assert((lag>>2) <= 400);
+   celt_assert((max_pitch>>1) <= 320);
 
    /* Downsample by 2 again */
    for (j=0;j<len>>2;j++)
