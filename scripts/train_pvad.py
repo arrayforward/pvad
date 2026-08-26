@@ -178,6 +178,9 @@ def main():
     ap.add_argument("--log-name", default="train_log.json")
     ap.add_argument("--cond", choices=["concat", "film", "attn"], default="concat",
                     help="enrollment 条件机制")
+    ap.add_argument("--save-all-epochs", action="store_true",
+                    help="每个 epoch 都保存 checkpoint (<ckpt-stem>_epNN.pt), "
+                         "供 F1-lambda*FAR 等准则事后选模")
     args = ap.parse_args()
 
     torch.set_num_threads(max(1, (os_cpu() or 8)))
@@ -229,6 +232,12 @@ def main():
             torch.save({"model": model.state_dict(), "epoch": ep,
                         "val": vm, "n_params": n_params,
                         "cond": args.cond}, out_dir / args.ckpt_name)
+        if args.save_all_epochs:
+            stem = args.ckpt_name.rsplit(".", 1)[0]
+            torch.save({"model": model.state_dict(), "epoch": ep,
+                        "val": vm, "n_params": n_params,
+                        "cond": args.cond},
+                       out_dir / f"{stem}_ep{ep:02d}.pt")
         with open(out_dir / args.log_name, "w", encoding="utf-8") as f:
             json.dump(log, f, ensure_ascii=False, indent=1)
     print(f"完成, 最优 val F1 {best_f1:.4f}, checkpoint: {out_dir / args.ckpt_name}")

@@ -191,6 +191,9 @@ def main():
                          "enrollment 来自不在场的另一说话人, 标签无 2)")
     ap.add_argument("--double-interferer", action="store_true",
                     help="负样本用两个干扰说话人同时干扰 (硬负例)")
+    ap.add_argument("--confusable-file", default=None,
+                    help="说话人 top5 近邻 json (build_v4: data/speaker_top5.json); "
+                         "负样本的干扰人改为目标说话人音色最近的 top5 之一")
     ap.add_argument("--append", action="store_true",
                     help="追加到已有 labels.jsonl (id 顺延), 而非重写")
     ap.add_argument("--rir-dir", default=None, help="RIR wav 目录 (卷积混响)")
@@ -210,6 +213,12 @@ def main():
             pools = json.load(f)
         allow = set(pools[args.pool])
         speakers = [s for s in speakers if s in allow]
+    confusable_nn = None
+    if args.confusable_file:
+        with open(args.confusable_file, encoding="utf-8") as f:
+            confusable_nn = json.load(f)
+        speakers = [s for s in speakers if s in confusable_nn]
+        print(f"易混淆模式: {len(speakers)} 个说话人有 top5 近邻")
     if len(speakers) < 2:
         print(f"可用说话人不足 ({len(speakers)}), 请先运行 prepare_corpus.py")
         return 1
@@ -312,6 +321,11 @@ def main():
         while made < neg_target:
             if args.double_interferer:
                 enroll_spk, itf_spk, itf_spk2 = rng.sample(speakers, 3)
+            elif confusable_nn is not None:
+                # 易混淆配对: 干扰人是目标说话人音色最近的 top5 之一
+                enroll_spk = rng.choice(speakers)
+                itf_spk = rng.choice(confusable_nn[enroll_spk])
+                itf_spk2 = None
             else:
                 enroll_spk, itf_spk = rng.sample(speakers, 2)
                 itf_spk2 = None

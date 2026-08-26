@@ -1,0 +1,186 @@
+{
+ "config": {
+  "train_dir": "data/mixtures_v4/train",
+  "val_dir": "data/mixtures_v4/val",
+  "out_dir": "D:\\ai-app\\double-voice\\models\\pvad",
+  "epochs": 15,
+  "batch": 32,
+  "lr": 0.001,
+  "target_weight": 3.0,
+  "weight1": 2.0,
+  "max_train": 0,
+  "workers": 4,
+  "ckpt_name": "best_v4.pt",
+  "log_name": "train_log_v4.json",
+  "cond": "film",
+  "save_all_epochs": true
+ },
+ "n_params": 260387,
+ "epochs": [
+  {
+   "epoch": 1,
+   "train_loss": 0.44395,
+   "elapsed_s": 729.7,
+   "val_loss": 1.09696,
+   "val_acc": 0.78821,
+   "val_target_recall": 0.96131,
+   "val_target_precision": 0.77846,
+   "val_target_f1": 0.86028,
+   "val_far": 0.57302
+  },
+  {
+   "epoch": 2,
+   "train_loss": 0.37622,
+   "elapsed_s": 608.6,
+   "val_loss": 1.06187,
+   "val_acc": 0.79783,
+   "val_target_recall": 0.9778,
+   "val_target_precision": 0.77871,
+   "val_target_f1": 0.86697,
+   "val_far": 0.58481
+  },
+  {
+   "epoch": 3,
+   "train_loss": 0.34477,
+   "elapsed_s": 665.2,
+   "val_loss": 1.01061,
+   "val_acc": 0.81406,
+   "val_target_recall": 0.95276,
+   "val_target_precision": 0.8075,
+   "val_target_f1": 0.87414,
+   "val_far": 0.47804
+  },
+  {
+   "epoch": 4,
+   "train_loss": 0.32523,
+   "elapsed_s": 607.0,
+   "val_loss": 0.99032,
+   "val_acc": 0.81734,
+   "val_target_recall": 0.95596,
+   "val_target_precision": 0.80968,
+   "val_target_f1": 0.87676,
+   "val_far": 0.47135
+  },
+  {
+   "epoch": 5,
+   "train_loss": 0.30414,
+   "elapsed_s": 660.8,
+   "val_loss": 0.98595,
+   "val_acc": 0.81866,
+   "val_target_recall": 0.93042,
+   "val_target_precision": 0.82617,
+   "val_target_f1": 0.8752,
+   "val_far": 0.41338
+  },
+  {
+   "epoch": 6,
+   "train_loss": 0.28442,
+   "elapsed_s": 603.9,
+   "val_loss": 0.97899,
+   "val_acc": 0.81443,
+   "val_target_recall": 0.96883,
+   "val_target_precision": 0.79926,
+   "val_target_f1": 0.87591,
+   "val_far": 0.50964
+  },
+  {
+   "epoch": 7,
+   "train_loss": 0.27082,
+   "elapsed_s": 658.5,
+   "val_loss": 0.97551,
+   "val_acc": 0.82222,
+   "val_target_recall": 0.95353,
+   "val_target_precision": 0.81587,
+   "val_target_f1": 0.87934,
+   "val_far": 0.45101
+  },
+  {
+   "epoch": 8,
+   "train_loss": 0.25793,
+   "elapsed_s": 608.1,
+   "val_loss": 1.03013,
+   "val_acc": 0.82098,
+   "val_target_recall": 0.94756,
+   "val_target_precision": 0.8179,
+   "val_target_f1": 0.87797,
+   "val_far": 0.4444
+  },
+  {
+   "epoch": 9,
+   "train_loss": 0.2432,
+   "elapsed_s": 652.1,
+   "val_loss": 1.11879,
+   "val_acc": 0.81807,
+   "val_target_recall": 0.91384,
+   "val_target_precision": 0.83404,
+   "val_target_f1": 0.87212,
+   "val_far": 0.38065
+  },
+  {
+   "epoch": 10,
+   "train_loss": 0.22703,
+   "elapsed_s": 607.4,
+   "val_loss": 1.07566,
+   "val_acc": 0.82386,
+   "val_target_recall": 0.95699,
+   "val_target_precision": 0.81493,
+   "val_target_f1": 0.88026,
+   "val_far": 0.45608
+  },
+  {
+   "epoch": 11,
+   "train_loss": 0.21146,
+   "elapsed_s": 663.5,
+   "val_loss": 1.06439,
+   "val_acc": 0.82667,
+   "val_target_recall": 0.94968,
+   "val_target_precision": 0.82319,
+   "val_target_f1": 0.88192,
+   "val_far": 0.42958
+  },
+  {
+   "epoch": 12,
+   "train_loss": 0.20565,
+   "elapsed_s": 614.4,
+   "val_loss": 1.09,
+   "val_acc": 0.818,
+   "val_target_recall": 0.9507,
+   "val_target_precision": 0.81319,
+   "val_target_f1": 0.87658,
+   "val_far": 0.45806
+  },
+  {
+   "epoch": 13,
+   "train_loss": 0.19189,
+   "elapsed_s": 690.2,
+   "val_loss": 1.22703,
+   "val_acc": 0.81559,
+   "val_target_recall": 0.90367,
+   "val_target_precision": 0.83769,
+   "val_target_f1": 0.86943,
+   "val_far": 0.36739
+  },
+  {
+   "epoch": 14,
+   "train_loss": 0.18599,
+   "elapsed_s": 612.6,
+   "val_loss": 1.2998,
+   "val_acc": 0.80381,
+   "val_target_recall": 0.87873,
+   "val_target_precision": 0.84076,
+   "val_target_f1": 0.85933,
+   "val_far": 0.34927
+  },
+  {
+   "epoch": 15,
+   "train_loss": 0.17807,
+   "elapsed_s": 671.1,
+   "val_loss": 1.20082,
+   "val_acc": 0.81377,
+   "val_target_recall": 0.92062,
+   "val_target_precision": 0.82527,
+   "val_target_f1": 0.87034,
+   "val_far": 0.40817
+  }
+ ]
+}
