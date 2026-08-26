@@ -1,5 +1,6 @@
 // mainwindow.h
 #pragma once
+#include <QCheckBox>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
@@ -47,6 +48,7 @@ private:
     QPushButton* stop_btn_;
     QRadioButton* mic_radio_;
     QRadioButton* wav_radio_;
+    QCheckBox* denoise_box_;
     QPushButton* wav_pick_btn_;
     QLabel* wav_label_;
     QProgressBar* prob_bar_;

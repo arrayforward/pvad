@@ -20,9 +20,25 @@ add_library(speexdsp STATIC
     ${SPEEX_DIR}/libspeexdsp/preprocess.c
     ${SPEEX_DIR}/libspeexdsp/buffer.c
     ${SPEEX_DIR}/libspeexdsp/scal.c
+    ${SPEEX_DIR}/libspeexdsp/resample.c
 )
 target_include_directories(speexdsp PUBLIC ${SPEEX_DIR}/include PRIVATE ${SPEEX_DIR}/libspeexdsp)
 target_compile_definitions(speexdsp PUBLIC USE_KISS_FFT FLOATING_POINT EXPORT=)
+
+# --- RNNoise (vendor 源码, 不跑其构建系统; master 已自带 rnn_fft_* 符号前缀, 与 speexdsp 无冲突) ---
+set(RNNOISE_DIR ${CMAKE_SOURCE_DIR}/third_party/rnnoise)
+add_library(rnnoise STATIC
+    ${RNNOISE_DIR}/src/denoise.c
+    ${RNNOISE_DIR}/src/rnn.c
+    ${RNNOISE_DIR}/src/rnn_data.c
+    ${RNNOISE_DIR}/src/kiss_fft.c
+    ${RNNOISE_DIR}/src/pitch.c
+    ${RNNOISE_DIR}/src/celt_lpc.c
+    ${RNNOISE_DIR}/src/rnn_reader.c
+)
+target_include_directories(rnnoise PUBLIC ${RNNOISE_DIR}/include PRIVATE ${RNNOISE_DIR}/src)
+set_target_properties(rnnoise PROPERTIES C_STANDARD 99)
+target_compile_definitions(rnnoise PRIVATE _USE_MATH_DEFINES)  # MSVC 的 math.h 需要才有 M_PI（MinGW 下无害）
 
 # --- core library: AEC + VAD + fbank + speaker embedding ---
 add_library(core STATIC
@@ -31,9 +47,10 @@ add_library(core STATIC
     src/fbank.cpp
     src/speaker.cpp
     src/pvad.cpp
+    src/denoise.cpp
 )
 target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src ${ORT_DIR}/include ${CMAKE_SOURCE_DIR}/third_party)
-target_link_libraries(core PUBLIC speexdsp ${ORT_DIR}/lib/onnxruntime.dll)
+target_link_libraries(core PUBLIC speexdsp rnnoise ${ORT_DIR}/lib/onnxruntime.dll)
 
 add_executable(double_voice src/main.cpp)
 target_link_libraries(double_voice PRIVATE core)

@@ -91,12 +91,14 @@ MainWindow::MainWindow() {
     mic_radio_ = new QRadioButton("麦克风", g_listen);
     wav_radio_ = new QRadioButton("WAV 注入", g_listen);
     mic_radio_->setChecked(true);
+    denoise_box_ = new QCheckBox("启用降噪", g_listen);
     wav_pick_btn_ = new QPushButton("选择WAV", g_listen);
     wav_label_ = new QLabel("(未选择)", g_listen);
     listen_btn_ = new QPushButton("开始监听", g_listen);
     stop_btn_ = new QPushButton("停止", g_listen);
     h3->addWidget(mic_radio_);
     h3->addWidget(wav_radio_);
+    h3->addWidget(denoise_box_);
     h3->addWidget(wav_pick_btn_);
     h3->addWidget(wav_label_, 1);
     h3->addWidget(listen_btn_);
@@ -175,6 +177,9 @@ MainWindow::MainWindow() {
     });
     connect(stop_btn_, &QPushButton::clicked, this, [this]() {
         QMetaObject::invokeMethod(engine_, "stopListen", Qt::QueuedConnection);
+    });
+    connect(denoise_box_, &QCheckBox::toggled, this, [this](bool on) {
+        QMetaObject::invokeMethod(engine_, "setDenoiseEnabled", Qt::QueuedConnection, Q_ARG(bool, on));
     });
 
     connect(engine_, &Engine::logLine, this, &MainWindow::log);

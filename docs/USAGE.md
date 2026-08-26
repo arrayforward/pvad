@@ -114,6 +114,8 @@ pvad 门控只用正质心；`--neg`/`--cohort` 仅供 asnorm 门控。
 | `--vad-threshold` | 0.5 | silero VAD 语音概率阈值（asnorm 模式门控） |
 | `--aec` | off | 显式启用 SpeexDSP AEC（离线需同时 `--far`） |
 | `--far PATH` | — | AEC 参考 wav（TTS 播放流） |
+| `--denoise off\|rnnoise` | `off` | 实时降噪（RNNoise，位于 采集→降噪→门控 最前端）。<br>**默认关**，A/B 实测结论：仅建议"持续底噪的干净会议室"场景手动开；噪声/混响明显时无收益（详见 DESIGN.md 第 7 节）。离线模式开降噪会先整段预降噪再跑管线，保证 PVAD 整段预计算作用在干净信号上 |
+| `--bench-denoise` | — | 实测降噪单帧耗时后退出（不开管线） |
 | `--play-tone` | off | 实时模式播放 440Hz 测试音（模拟 TTS 播放） |
 | `--seconds` | 30 | 实时模式运行时长 |
 | `--vad-model/--spk-model` | models/ 下 | silero/CAM++ 模型路径 |
@@ -192,6 +194,8 @@ windeployqt 自动拷贝；sherpa/onnxruntime DLL 一并拷贝（onnxruntime.dll
 - **监听区**：`开始监听`/`停止`；音源二选一：
   - **麦克风**：真实采集（流式 PVAD，0.5s warm-up）
   - **WAV 注入**：选 wav 模拟麦克风（整段预计算，可复现；约 2 倍速灌入）
+  - `启用降噪` 勾选框（默认关）：RNNoise 实时降噪，对麦克风和 WAV 注入都生效，
+    新增延迟约 11ms。适用场景结论同 CLI（持续底噪的干净环境才建议开）
 - **门控状态**：P(target) 进度条 + 数值 + consec；触发时红色高亮
 - **事件日志**：注册/合成/播放/监听/INTERRUPT/播放停止，均带时间戳
 

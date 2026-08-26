@@ -35,16 +35,25 @@ def judge(trig, overlaps, labels):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-n", type=int, default=50)
+    ap.add_argument("--test-dir", default=str(ROOT / "data" / "mixtures" / "test"))
+    ap.add_argument("--denoise", default=None, choices=[None, "off", "rnnoise"],
+                    help="透传给 double_voice 的 --denoise（默认不传=off）")
+    ap.add_argument("--pvad-model", default=None)
     args = ap.parse_args()
 
     recs = []
-    with open(ROOT / "data" / "mixtures" / "test" / "labels.jsonl", encoding="utf-8") as f:
+    with open(Path(args.test_dir) / "labels.jsonl", encoding="utf-8") as f:
         for line in f:
             r = json.loads(line)
             if r.get("overlap_frames"):
                 recs.append(r)
     recs = recs[: args.max_n]
-    print(f"双讲样本 {len(recs)} 条")
+    extra = []
+    if args.denoise:
+        extra += ["--denoise", args.denoise]
+    if args.pvad_model:
+        extra += ["--pvad-model", args.pvad_model]
+    print(f"双讲样本 {len(recs)} 条 (test_dir={args.test_dir}, extra={extra})")
 
     stats = {"miss": 0, "false": 0, "ok": 0}
     delays = []
@@ -63,7 +72,7 @@ def main():
                 continue
             p = subprocess.run(
                 [str(ROOT / "build" / "double_voice.exe"), "--wav", str(mix),
-                 "--template", str(tpl), "--gate", "pvad"],
+                 "--template", str(tpl), "--gate", "pvad", *extra],
                 cwd=ROOT, capture_output=True, text=True)
             m = re.search(r"\[t=\s*([0-9.]+)\].*>>> INTERRUPT <<<", p.stdout)
             trig = int(round(float(m.group(1)) * 100)) if m else None

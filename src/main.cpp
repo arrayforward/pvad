@@ -2,12 +2,14 @@
 // 离线: double_voice --wav in.wav --template tpl.bin [--aec --far ref.wav] [选项]（默认无 AEC）
 // 实时: double_voice --mic --template tpl.bin [--play-tone] [--aec] [--seconds 30] [选项]
 #include "aec.h"
+#include "denoise.h"
 #include "fbank.h"
 #include "gate.h"
 #include "pvad.h"
 #include "speaker.h"
 #include "vad.h"
 #include "wav_io.h"
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -29,6 +31,8 @@ struct Args {
     std::string spk_model = "models/campplus.onnx";
     std::string pvad_model = "models/pvad/pvad.onnx";
     std::string gate_mode = "pvad";   // pvad (默认) | asnorm
+    std::string denoise = "off";      // off (默认) | rnnoise
+    bool bench_denoise = false;
     float pvad_threshold = 0.5f;
     float pvad_hyst = 0.2f;
     float threshold = 0.55f;
@@ -51,6 +55,8 @@ options:
   --pvad-threshold 0.5  pvad 模式: P(target) 触发阈值
   --pvad-hyst 0.2     pvad 模式: 低于 threshold-hyst 计数清零
   --pvad-model PATH   pvad.onnx 路径
+  --denoise off       降噪: off (默认) | rnnoise (RNNoise, 采集→降噪→门控)
+  --bench-denoise     测降噪单帧耗时后退出
   --threshold 0.55    asnorm no-norm 模式: sA_raw 触发阈值
   --z-threshold 3.0   norm 模式: sA_norm=(sA_raw-mu)/sigma 触发阈值
   --norm-topk 50      t-norm 取 cohort 相似度 top-K 估计 mu/sigma
@@ -80,6 +86,8 @@ Args parse_args(int argc, char** argv) {
         else if (s == "--pvad-threshold") a.pvad_threshold = std::stof(next("0.5"));
         else if (s == "--pvad-hyst") a.pvad_hyst = std::stof(next("0.2"));
         else if (s == "--pvad-model") a.pvad_model = next("");
+        else if (s == "--denoise") a.denoise = next("off");
+        else if (s == "--bench-denoise") a.bench_denoise = true;
         else if (s == "--threshold") a.threshold = std::stof(next("0.55"));
         else if (s == "--margin") a.margin = std::stof(next("0.15"));
         else if (s == "--z-threshold") a.z_threshold = std::stof(next("3.0"));
@@ -104,6 +112,8 @@ struct Pipeline {
     Gate gate;
     PvadGate pgate;
     std::unique_ptr<Pvad> pvad;
+    std::unique_ptr<Denoise> denoise;
+    bool skip_frame_denoise = false;  // 离线预降噪后跳过逐帧降噪
     bool pvad_mode;
     std::unique_ptr<Aec> aec;
     std::deque<float> win;      // 滑窗采样环形缓冲（asnorm 用）
@@ -123,6 +133,7 @@ struct Pipeline {
           pvad_mode(a.gate_mode == "pvad"),
           win_len((size_t)a.window_ms * 16), vad_threshold(a.vad_threshold), norm_topk(a.norm_topk) {
         if (pvad_mode) pvad = std::make_unique<Pvad>(a.pvad_model);
+        if (a.denoise == "rnnoise") denoise = std::make_unique<Denoise>();
         if (a.aec) aec = std::make_unique<Aec>(160, 2048, 16000);
         gate.reset();
         pgate.reset();
@@ -130,9 +141,16 @@ struct Pipeline {
 
     // 处理一个 10ms 帧；far_frame 可为 nullptr（不做 AEC）。t_sec 用于打印时间戳。
     void process_frame(const float* frame, const float* far_frame, double t_sec) {
+        // 采集 -> (可选降噪) -> (可选 AEC) -> VAD/PVAD 门控
+        float dn[160];
+        const float* src = frame;
+        if (denoise && !skip_frame_denoise) {
+            denoise->process(frame, dn);
+            src = dn;
+        }
         float clean[160];
-        if (aec && far_frame) aec->process(frame, far_frame, clean);
-        else memcpy(clean, frame, sizeof(clean));
+        if (aec && far_frame) aec->process(src, far_frame, clean);
+        else memcpy(clean, src, sizeof(clean));
 
         float vad_prob = vad.process(clean, 160);
         for (int i = 0; i < 160; i++) {
@@ -220,17 +238,26 @@ int run_offline(const Args& a) {
         far_samples = std::move(fw.samples);
     }
     Pipeline pipe(a);
-    if (pipe.pvad_mode) pipe.precompute_pvad(wd.samples.data(), (int)wd.samples.size());
-    printf("offline: %s (%.2fs), AEC=%s, gate=%s, confirm=%d window=%dms\n",
-           a.wav.c_str(), wd.samples.size() / 16000.0,
+    std::vector<float> samples = wd.samples;
+    // 开降噪时先整段预降噪（流式过一遍），保证 PVAD 整段预计算也作用在干净信号上
+    if (pipe.denoise) {
+        std::vector<float> out(samples.size());
+        size_t nf = samples.size() / 160;
+        for (size_t i = 0; i < nf; i++) pipe.denoise->process(&samples[i * 160], &out[i * 160]);
+        samples = std::move(out);
+        pipe.skip_frame_denoise = true;
+    }
+    if (pipe.pvad_mode) pipe.precompute_pvad(samples.data(), (int)samples.size());
+    printf("offline: %s (%.2fs), AEC=%s, denoise=%s, gate=%s, confirm=%d window=%dms\n",
+           a.wav.c_str(), samples.size() / 16000.0,
            (a.aec && !far_samples.empty()) ? a.far_wav.c_str() : "off",
-           a.gate_mode.c_str(), a.confirm, a.window_ms);
-    size_t n = wd.samples.size() / 160;
+           a.denoise.c_str(), a.gate_mode.c_str(), a.confirm, a.window_ms);
+    size_t n = samples.size() / 160;
     for (size_t i = 0; i < n; i++) {
         const float* far_frame = nullptr;
         if (!far_samples.empty() && (i + 1) * 160 <= far_samples.size())
             far_frame = &far_samples[i * 160];
-        pipe.process_frame(&wd.samples[i * 160], far_frame, i * 0.01);
+        pipe.process_frame(&samples[i * 160], far_frame, i * 0.01);
     }
     printf("done.\n");
     return 0;
@@ -332,6 +359,23 @@ int main(int argc, char** argv) {
     if (argc < 2) { usage(); return 1; }
     Args a = parse_args(argc, argv);
     try {
+        if (a.bench_denoise) {
+            // 降噪单帧耗时实测：1000 帧预热 + 10000 帧计时
+            Denoise d;
+            float in[160], out[160];
+            for (int i = 0; i < 160; i++) in[i] = 0.05f * ((i * 37 % 100) / 100.f - 0.5f);
+            for (int i = 0; i < 1000; i++) d.process(in, out);
+            auto t0 = std::chrono::steady_clock::now();
+            const int N = 10000;
+            for (int i = 0; i < N; i++) d.process(in, out);
+            auto t1 = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / N;
+            printf("denoise(rnnoise): %.4f ms/frame (10ms frame), ~%.1f%% of realtime budget (1 thread)\n",
+                   ms, ms / 10.0 * 100.0);
+            printf("added pipeline latency: %.1f ms (RNNoise 10ms frame + resampler group delay)\n",
+                   Denoise::extra_latency_ms());
+            return 0;
+        }
         if (a.mic) return run_realtime(a);
         if (!a.wav.empty()) return run_offline(a);
         usage();

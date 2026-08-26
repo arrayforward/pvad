@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(pvad_bargein_demo LANGUAGES CXX)
+project(pvad_bargein_demo LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,14 +17,37 @@ set(ORT_DIR ${PROJ_ROOT}/third_party/onnxruntime)
 set(SHERPA_DIR ${PROJ_ROOT}/third_party/sherpa-onnx)
 set(TTS_MODEL_DIR "D:/vit/tts/models/vits-piper-zh_CN-huayan-medium" CACHE PATH "vits-piper TTS 模型目录")
 
-# 管线核心（复用 ../src，不含 AEC/speexdsp、不含 silero vad——demo 走 pvad 门控）
+# 管线核心（复用 ../src，不含 AEC/speexdsp mdf、不含 silero vad——demo 走 pvad 门控）
 add_library(pipe STATIC
     ${PROJ_ROOT}/src/fbank.cpp
     ${PROJ_ROOT}/src/speaker.cpp
     ${PROJ_ROOT}/src/pvad.cpp
+    ${PROJ_ROOT}/src/denoise.cpp
 )
 target_include_directories(pipe PUBLIC ${PROJ_ROOT}/src ${ORT_DIR}/include)
 target_link_libraries(pipe PUBLIC ${ORT_DIR}/lib/onnxruntime.lib)
+
+# RNNoise（vendor 源码）+ speexdsp 重采样（demo 只需要 resample.c）
+set(RNNOISE_DIR ${PROJ_ROOT}/third_party/rnnoise)
+add_library(rnnoise STATIC
+    ${RNNOISE_DIR}/src/denoise.c
+    ${RNNOISE_DIR}/src/rnn.c
+    ${RNNOISE_DIR}/src/rnn_data.c
+    ${RNNOISE_DIR}/src/kiss_fft.c
+    ${RNNOISE_DIR}/src/pitch.c
+    ${RNNOISE_DIR}/src/celt_lpc.c
+    ${RNNOISE_DIR}/src/rnn_reader.c
+)
+target_include_directories(rnnoise PUBLIC ${RNNOISE_DIR}/include PRIVATE ${RNNOISE_DIR}/src)
+set_target_properties(rnnoise PROPERTIES C_STANDARD 99)
+target_compile_definitions(rnnoise PRIVATE _USE_MATH_DEFINES)  # MSVC 的 math.h 需要才有 M_PI
+
+add_library(resampler STATIC ${PROJ_ROOT}/third_party/speexdsp/libspeexdsp/resample.c)
+target_include_directories(resampler PUBLIC ${PROJ_ROOT}/third_party/speexdsp/include
+    PRIVATE ${PROJ_ROOT}/third_party/speexdsp/libspeexdsp)
+target_compile_definitions(resampler PUBLIC FLOATING_POINT EXPORT=)
+
+target_link_libraries(pipe PUBLIC rnnoise resampler)
 
 add_executable(pvad_demo
     main.cpp

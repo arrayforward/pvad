@@ -281,6 +281,20 @@ void Engine::clearEnroll() {
     emit logLine("已清空注册集合");
 }
 
+void Engine::setDenoiseEnabled(bool on) {
+    if (on && !denoise_) {
+        try {
+            denoise_ = std::make_unique<Denoise>();
+            emit logLine("降噪已启用（RNNoise，新增延迟约 11ms）");
+        } catch (const std::exception& e) {
+            emit logLine("降噪初始化失败: " + QString::fromStdString(e.what()));
+        }
+    } else if (!on && denoise_) {
+        denoise_.reset();
+        emit logLine("降噪已关闭");
+    }
+}
+
 // ---------------- 引导注册 ----------------
 
 void Engine::startWizard() {
@@ -322,7 +336,10 @@ void Engine::tick() {
     // 优先消费注入音频（每 tick 处理 20ms，略快于实时，demo 用）
     if (inject_mode_) {
         for (int k = 0; k < 2 && inject_pos_ + 160 <= inject_.size(); k++) {
-            FrameEvent ev = core_.feed_frame(inject_.data() + inject_pos_);
+            float frame[160];
+            const float* src = inject_.data() + inject_pos_;
+            if (denoise_) { denoise_->process(src, frame); src = frame; }
+            FrameEvent ev = core_.feed_frame(src);
             inject_pos_ += 160;
             handleEvent(ev);
         }
@@ -342,8 +359,15 @@ void Engine::tick() {
             if (capq_.size() < 160) break;
             for (int i = 0; i < 160; i++) { frame[i] = capq_.front(); capq_.pop_front(); }
         }
-        FrameEvent ev = core_.feed_frame(frame);
-        handleEvent(ev);
+        if (denoise_) {
+            float dn[160];
+            denoise_->process(frame, dn);
+            FrameEvent ev = core_.feed_frame(dn);
+            handleEvent(ev);
+        } else {
+            FrameEvent ev = core_.feed_frame(frame);
+            handleEvent(ev);
+        }
     }
 }
 

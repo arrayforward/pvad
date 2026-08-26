@@ -10,6 +10,7 @@
 #include <mutex>
 #include <vector>
 #include "demo_core.h"
+#include "denoise.h"
 #include "tts.h"
 #include "wizard.h"
 #include <miniaudio.h>
@@ -33,6 +34,7 @@ public slots:
     void clearEnroll();                   // 清空注册集合
     void startWizard();                   // 引导注册：备份旧注册并开始 3 段向导
     void cancelWizard();                  // 引导注册：取消并恢复旧注册
+    void setDenoiseEnabled(bool on);      // 监听降噪（RNNoise），默认关
 
 signals:
     void logLine(QString);
@@ -66,6 +68,7 @@ private:
     DemoCore core_;
     Tts tts_;
     bool models_ok_ = false;
+    std::unique_ptr<Denoise> denoise_;    // 勾选[启用降噪]时创建
 
     ma_device cap_{};
     ma_device pb_{};
