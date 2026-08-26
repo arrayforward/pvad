@@ -27,6 +27,7 @@ struct Args {
     bool play_tone = false;
     bool aec = false;            // 默认不做 AEC，显式 --aec 才启用（离线还需 --far）
     std::string wav, far_wav, tpl = "tpl.bin";
+    std::string batch_list, batch_out;   // 批量模式：--batch-list 文件列表 -> --batch-out 结果
     std::string vad_model = "models/silero_vad.onnx";
     std::string spk_model = "models/campplus.onnx";
     std::string pvad_model = "models/pvad/pvad.onnx";
@@ -80,6 +81,8 @@ Args parse_args(int argc, char** argv) {
         else if (s == "--play-tone") a.play_tone = true;
         else if (s == "--aec") a.aec = true;
         else if (s == "--wav") a.wav = next("");
+        else if (s == "--batch-list") a.batch_list = next("");
+        else if (s == "--batch-out") a.batch_out = next("batch_out.tsv");
         else if (s == "--far") a.far_wav = next("");
         else if (s == "--template") a.tpl = next("tpl.bin");
         else if (s == "--gate") a.gate_mode = next("pvad");
@@ -355,6 +358,82 @@ int run_realtime(const Args& a) {
 
 }  // namespace
 
+// ---------------- 批量模式（回归网格用） ----------------
+// 输入列表每行: <wav路径>\t<tpl路径>；输出每行: <wav路径>\t<首个INTERRUPT帧|-1>\t<max_p>
+// 模型只加载一次；每个文件的处理与 run_offline 的 pvad 路径语义一致：
+// （可选整段预降噪）→ 整段 fbank+PVAD 预计算 → 逐帧 silero VAD（speech-end 复位门控）
+// → PvadGate 扫描。enrollment 用预算好的 tpl（与历史 eval_cpp_pvad.py 的现场 enroll 等价）。
+int run_batch(const Args& a) {
+    FILE* fin = fopen(a.batch_list.c_str(), "r");
+    if (!fin) throw std::runtime_error("cannot open batch list: " + a.batch_list);
+    FILE* fout = fopen(a.batch_out.c_str(), "w");
+    if (!fout) throw std::runtime_error("cannot write batch out: " + a.batch_out);
+
+    Vad vad(a.vad_model);
+    Pvad pvad(a.pvad_model);
+    Fbank fbank;
+
+    char line[8192];
+    int idx = 0;
+    while (fgets(line, sizeof(line), fin)) {
+        std::string s(line);
+        size_t tab = s.find('\t');
+        if (tab == std::string::npos) continue;
+        std::string wav_path = s.substr(0, tab);
+        std::string tpl_path = s.substr(tab + 1);
+        while (!tpl_path.empty() && (tpl_path.back() == '\n' || tpl_path.back() == '\r' || tpl_path.back() == ' ' || tpl_path.back() == '\t'))
+            tpl_path.pop_back();
+        if (wav_path.empty() || tpl_path.empty()) continue;
+
+        WavData wd = read_wav(wav_path);
+        std::vector<float> samples = wd.samples;
+        if (a.denoise == "rnnoise") {
+            Denoise d;
+            std::vector<float> out(samples.size());
+            size_t nf = samples.size() / 160;
+            for (size_t i = 0; i < nf; i++) d.process(&samples[i * 160], &out[i * 160]);
+            samples = std::move(out);
+        }
+        Template tpl = load_template(tpl_path);
+
+        std::vector<float> feats;
+        int T = fbank.compute(samples.data(), (int)samples.size(), feats);
+        std::vector<float> p2;
+        if (T >= 4) {
+            mean_normalize(feats, T, 80);
+            p2 = pvad.target_probs(feats.data(), T, tpl.pos.data());
+        }
+
+        // 逐帧门控（与 run_offline pvad 路径一致：frame>=4 起评分，VAD speech-end 复位）
+        PvadGate gate{a.pvad_threshold, a.pvad_hyst, a.confirm};
+        vad.reset();
+        bool prev_speech = false;
+        int first = -1;
+        float maxp = 0.f;
+        size_t nf = samples.size() / 160;
+        for (size_t t = 0; t < nf; t++) {
+            float vp = vad.process(&samples[t * 160], 160);
+            if (vp >= 0.f) {
+                bool speech = vp > a.vad_threshold;
+                if (prev_speech && !speech) gate.reset();
+                prev_speech = speech;
+            }
+            if (t >= 4 && t < p2.size()) {
+                float p = p2[t];
+                if (p > maxp) maxp = p;
+                if (gate.update(p) && first < 0) first = (int)t;
+            }
+        }
+        fprintf(fout, "%s\t%d\t%.4f\n", wav_path.c_str(), first, maxp);
+        fflush(fout);
+        if (++idx % 50 == 0) printf("[batch] %d files done\n", idx);
+    }
+    fclose(fin);
+    fclose(fout);
+    printf("[batch] done, %d files -> %s\n", idx, a.batch_out.c_str());
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) { usage(); return 1; }
     Args a = parse_args(argc, argv);
@@ -377,6 +456,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (a.mic) return run_realtime(a);
+        if (!a.batch_list.empty()) return run_batch(a);
         if (!a.wav.empty()) return run_offline(a);
         usage();
         return 1;
