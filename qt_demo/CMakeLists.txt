@@ -31,6 +31,7 @@ add_executable(pvad_demo
     mainwindow.h mainwindow.cpp
     engine.h engine.cpp
     demo_core.h demo_core.cpp
+    wizard.h wizard.cpp
     tts.h tts.cpp
     autotest.h autotest.cpp
 )

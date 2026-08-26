@@ -95,6 +95,7 @@ bool Engine::openPlayback(int sample_rate) {
 }
 
 void Engine::speakText(QString text) {
+    if (wizard_.active()) { emit logLine("引导注册中，请先完成或取消向导"); return; }
     if (text.trimmed().isEmpty()) return;
     emit ttsStatus("合成中...");
     std::vector<float> pcm;
@@ -153,7 +154,7 @@ bool Engine::openCapture() {
 }
 
 void Engine::startListenMic() {
-    if (recording_) { emit logLine("录音注册中，请先停止录音"); return; }
+    if (recording_ || wizard_.active()) { emit logLine("录音/向导中，请先完成或停止"); return; }
     if (!core_.enrolled()) { emit logLine("请先注册 A"); return; }
     inject_mode_ = false;
     if (!openCapture()) return;
@@ -166,7 +167,7 @@ void Engine::startListenMic() {
 }
 
 void Engine::startListenWav(QString path) {
-    if (recording_) { emit logLine("录音注册中，请先停止录音"); return; }
+    if (recording_ || wizard_.active()) { emit logLine("录音/向导中，请先完成或停止"); return; }
     if (!core_.enrolled()) { emit logLine("请先注册 A"); return; }
     try {
         WavData wd = read_wav(path.toStdString());
@@ -226,7 +227,12 @@ void Engine::finishRecord() {
     emit recordStateChanged(false);
     double dur = recbuf_.size() / 16000.0;
     if (recbuf_.size() < kMinRecordSamples) {
-        emit logLine(QString("录音太短（%.1fs，建议3-10秒），未加入注册").arg(dur));
+        if (wizard_.active()) {
+            emit wizardSegmentRejected(dur);
+            emit logLine(QString("本段太短（%1s，建议3-10秒），请重录本段").arg(dur, 0, 'f', 1));
+        } else {
+            emit logLine(QString("录音太短（%.1fs，建议3-10秒），未加入注册").arg(dur));
+        }
         return;
     }
     // 保存 wav 到 qt_demo/recordings/（文件名带时间戳）
@@ -238,6 +244,25 @@ void Engine::finishRecord() {
         write_wav16(fname.toStdString(), recbuf_, 16000);
     } catch (const std::exception& ex) {
         emit logLine("录音保存失败: " + QString::fromStdString(ex.what()));
+    }
+    // 向导态：段入向导状态机（取消向导时整体回滚，不会污染旧质心）
+    if (wizard_.active()) {
+        if (wizard_.accept_segment(core_, recbuf_.data(), recbuf_.size())) {
+            int done_idx = wizard_.step() - 1;
+            emit wizardSegmentAccepted(done_idx, dur);
+            emit logLine(QString("第 %1/3 段已录入（%2s）").arg(done_idx + 1).arg(dur, 0, 'f', 1));
+            if (wizard_.step() >= WizardController::kTotal) {
+                emit wizardFinished(core_.enroll_count());
+                emit wizardStateChanged(false);
+                emit enrollStatus(QString("注册完成（%1 段）").arg(core_.enroll_count()));
+                emit logLine(QString("引导注册完成，共 %1 段").arg(core_.enroll_count()));
+            } else {
+                emit wizardStepChanged(wizard_.step());
+            }
+        } else {
+            emit wizardSegmentRejected(dur);
+        }
+        return;
     }
     if (core_.enroll_samples(recbuf_.data(), recbuf_.size(), e)) {
         emit enrollStatus(QString("已注册 %1 段").arg(core_.enroll_count()));
@@ -254,6 +279,32 @@ void Engine::clearEnroll() {
     core_.clear_enroll();
     emit enrollStatus("未注册");
     emit logLine("已清空注册集合");
+}
+
+// ---------------- 引导注册 ----------------
+
+void Engine::startWizard() {
+    if (listening_ || recording_ || wizard_.active()) {
+        emit logLine("请先停止当前监听/录音");
+        return;
+    }
+    if (!models_ok_) { emit logLine("模型未就绪"); return; }
+    wizard_.start(core_);
+    emit wizardStateChanged(true);
+    emit wizardStepChanged(0);
+    emit enrollStatus("引导注册中（旧注册已备份，取消可恢复）");
+    emit logLine("开始引导注册：3 段，按提示照念");
+}
+
+void Engine::cancelWizard() {
+    if (!wizard_.active()) return;
+    if (recording_) { emit logLine("请先停止录音"); return; }
+    wizard_.cancel(core_);
+    emit wizardStateChanged(false);
+    emit wizardCancelled();
+    emit enrollStatus(core_.enrolled() ? QString("已注册 %1 段").arg(core_.enroll_count())
+                                       : QString("未注册"));
+    emit logLine("已取消向导，恢复之前的注册");
 }
 
 void Engine::tick() {

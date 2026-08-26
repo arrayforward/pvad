@@ -11,6 +11,7 @@
 #include <vector>
 #include "demo_core.h"
 #include "tts.h"
+#include "wizard.h"
 #include <miniaudio.h>
 
 class Engine : public QObject {
@@ -30,6 +31,8 @@ public slots:
     void startRecord();                   // 录音注册：开始（与监听互斥，15s 上限自动停止）
     void stopRecord();                    // 录音注册：手动停止
     void clearEnroll();                   // 清空注册集合
+    void startWizard();                   // 引导注册：备份旧注册并开始 3 段向导
+    void cancelWizard();                  // 引导注册：取消并恢复旧注册
 
 signals:
     void logLine(QString);
@@ -41,6 +44,12 @@ signals:
     void recordStateChanged(bool recording);
     void recordProgress(double seconds);
     void ttsStatus(QString);
+    void wizardStateChanged(bool active);
+    void wizardStepChanged(int step);              // 0..2 进行中
+    void wizardSegmentAccepted(int stepIndex, double seconds);
+    void wizardSegmentRejected(double seconds);    // 太短，重录本段
+    void wizardFinished(int segments);
+    void wizardCancelled();
 
 private slots:
     void tick();
@@ -77,6 +86,7 @@ private:
 
     bool listening_ = false;              // 监听中（与录音互斥）
     bool recording_ = false;              // 录音注册中（与监听互斥）
+    WizardController wizard_;             // 引导注册状态机（active() 时为向导态）
     std::vector<float> recbuf_;           // 录音缓冲（16k float）
     static constexpr size_t kMaxRecordSamples = 16000 * 15;  // 15s 上限
     static constexpr size_t kMinRecordSamples = 16000 * 2;   // <2s 不入注册

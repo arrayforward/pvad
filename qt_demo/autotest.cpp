@@ -7,6 +7,7 @@
 #include "demo_core.h"
 #include "tts.h"
 #include "wav_io.h"
+#include "wizard.h"
 #include <cstdio>
 #include <chrono>
 #include <ctime>
@@ -209,4 +210,94 @@ int run_record_test(const std::string& root, int seconds) {
     }
     printf("[record-test] enrolled OK, segments=%d -> PASS\n", core.enroll_count());
     return 0;
+}
+
+// ---------------- 引导注册状态机无头验证 ----------------
+
+int run_wizard_test(const std::string& root) {
+    int fails = 0;
+    std::string err;
+    DemoCore core;
+    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v3.onnx", err)) {
+        printf("[wizard-test] core init failed: %s\n", err.c_str());
+        return 1;
+    }
+    // 预注册旧质心（模拟用户已有注册）
+    if (!core.enroll({root + "/test_audio/voice1.wav"}, err)) {
+        printf("[wizard-test] pre-enroll failed: %s\n", err.c_str());
+        return 1;
+    }
+    std::vector<float> old_sum;
+    int old_n = 0;
+    core.get_enroll_state(old_sum, old_n);
+
+    WavData wd = read_wav(root + "/test_audio/voice1b.wav");  // ~9.8s
+    const float* pcm = wd.samples.data();
+
+    // 路径1「单段太短重录」：1s 拒收，不计入进度；3s 通过
+    {
+        WizardController w;
+        w.start(core);
+        bool rejected = !w.accept_segment(core, pcm, 16000 * 1) && w.step() == 0;
+        bool accepted = w.accept_segment(core, pcm, 16000 * 3) && w.step() == 1;
+        bool pass = rejected && accepted;
+        printf("WIZARD path1 short-reject-retry: reject_1s=%d accept_3s=%d -> %s\n",
+               (int)rejected, (int)accepted, pass ? "PASS" : "FAIL");
+        if (!pass) fails++;
+        // 继续走完剩余 2 段（供路径2 的"完成 3 段"复用同一向导）
+        bool ok2 = w.accept_segment(core, pcm + 16000 * 3, 16000 * 3) && w.step() == 2;
+        bool ok3 = w.accept_segment(core, pcm + 16000 * 4, 16000 * 5) &&
+                   w.step() == WizardController::kTotal && !w.active();
+        bool done = ok2 && ok3 && core.enroll_count() == 3;
+        printf("WIZARD path2 complete-3-segments: step=%d active=%d enrolled=%d -> %s\n",
+               w.step(), (int)w.active(), core.enroll_count(), done ? "PASS" : "FAIL");
+        if (!done) fails++;
+    }
+
+    // 路径3「中途取消恢复旧质心」：向导开始后备份当前状态，录 1 段后取消，状态须逐位还原
+    {
+        std::vector<float> pre_sum;
+        int pre_n = 0;
+        core.get_enroll_state(pre_sum, pre_n);  // 当前为路径1/2 后的 3 段状态
+        WizardController w;
+        w.start(core);
+        if (!w.accept_segment(core, pcm, 16000 * 3)) {
+            printf("WIZARD path3 cancel-restore: accept failed -> FAIL\n");
+            fails++;
+        } else {
+            w.cancel(core);
+            std::vector<float> post_sum;
+            int post_n = 0;
+            core.get_enroll_state(post_sum, post_n);
+            bool pass = (post_n == pre_n) && (post_sum == pre_sum) && !w.active();
+            printf("WIZARD path3 cancel-restore: n %d->%d sum_equal=%d -> %s\n",
+                   pre_n, post_n, (int)(post_sum == pre_sum), pass ? "PASS" : "FAIL");
+            if (!pass) fails++;
+        }
+    }
+
+    // 路径4「取消发生在 0 段时」：直接取消也须还原（边界）
+    {
+        std::vector<float> pre_sum;
+        int pre_n = 0;
+        core.get_enroll_state(pre_sum, pre_n);
+        WizardController w;
+        w.start(core);  // 清空注册
+        if (core.enrolled()) {
+            printf("WIZARD path4 cancel-at-step0: enroll not cleared on start -> FAIL\n");
+            fails++;
+        } else {
+            w.cancel(core);
+            std::vector<float> post_sum;
+            int post_n = 0;
+            core.get_enroll_state(post_sum, post_n);
+            bool pass = (post_n == pre_n) && (post_sum == pre_sum);
+            printf("WIZARD path4 cancel-at-step0: restored=%d -> %s\n", (int)pass,
+                   pass ? "PASS" : "FAIL");
+            if (!pass) fails++;
+        }
+    }
+
+    printf("[wizard-test] %s\n", fails == 0 ? "ALL PASS" : "HAS FAILURES");
+    return fails == 0 ? 0 : 1;
 }

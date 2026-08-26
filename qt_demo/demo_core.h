@@ -29,6 +29,12 @@ public:
     // 追加一段裸 16k 音频到注册集合（录音注册用）
     bool enroll_samples(const float* pcm, size_t n, std::string& err);
     void clear_enroll();
+    // 注册状态备份/恢复（引导注册"取消则恢复旧质心"语义用）
+    void get_enroll_state(std::vector<float>& emb_sum, int& n) const {
+        emb_sum = emb_sum_;
+        n = n_emb_;
+    }
+    void set_enroll_state(const std::vector<float>& emb_sum, int n);
     bool enrolled() const { return has_tpl_; }
     int enroll_count() const { return n_emb_; }
 

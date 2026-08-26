@@ -66,6 +66,18 @@ void DemoCore::clear_enroll() {
     has_tpl_ = false;
 }
 
+void DemoCore::set_enroll_state(const std::vector<float>& emb_sum, int n) {
+    emb_sum_ = emb_sum;
+    n_emb_ = n;
+    has_tpl_ = n > 0 && !emb_sum_.empty();
+    if (has_tpl_) {
+        centroid_ = emb_sum_;
+        l2_normalize(centroid_);
+    } else {
+        centroid_.clear();
+    }
+}
+
 void DemoCore::reset_stream() {
     seg_.clear();
     p2_pre_.clear();

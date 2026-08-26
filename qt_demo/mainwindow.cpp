@@ -1,12 +1,13 @@
 // mainwindow.cpp
 #include "mainwindow.h"
 #include "engine.h"
+#include "wizard.h"
 #include <QDateTime>
 #include <QFileDialog>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QTimer>
 #include <QVBoxLayout>
-#include <QGroupBox>
 
 MainWindow::MainWindow() {
     auto* central = new QWidget(this);
@@ -19,20 +20,59 @@ MainWindow::MainWindow() {
     enroll_btn_ = new QPushButton("选择WAV注册A", g_enroll);
     rec_btn_ = new QPushButton("录音注册", g_enroll);
     clear_btn_ = new QPushButton("清空注册", g_enroll);
+    wizard_btn_ = new QPushButton("开始引导注册", g_enroll);
     enroll_label_ = new QLabel("未注册", g_enroll);
     h1->addWidget(enroll_btn_);
     h1->addWidget(rec_btn_);
     h1->addWidget(clear_btn_);
+    h1->addWidget(wizard_btn_);
     h1->addWidget(enroll_label_, 1);
     auto* h1b = new QHBoxLayout();
     rec_state_label_ = new QLabel("", g_enroll);
-    auto* hint = new QLabel("建议：每段 3-10 秒，录 3-5 段，变换与麦克风的距离/角度", g_enroll);
+    auto* hint = new QLabel("建议：每段 3-10 秒，录 3-5 段，变换与麦克风的距离/角度（或用引导注册）", g_enroll);
     hint->setStyleSheet("color: gray;");
     h1b->addWidget(rec_state_label_);
     h1b->addWidget(hint, 1);
     v_enroll->addLayout(h1);
     v_enroll->addLayout(h1b);
     vbox->addWidget(g_enroll);
+
+    // 引导注册面板（默认隐藏）
+    wizard_box_ = new QGroupBox("引导注册", this);
+    auto* wiz_v = new QVBoxLayout(wizard_box_);
+    wiz_step_label_ = new QLabel("第 1/3 段", wizard_box_);
+    QFont big = wiz_step_label_->font();
+    big.setPointSize(big.pointSize() + 6);
+    big.setBold(true);
+    wiz_step_label_->setFont(big);
+    wiz_hint_label_ = new QLabel(wizard_box_);
+    wiz_text_label_ = new QLabel(wizard_box_);
+    QFont tfont = wiz_text_label_->font();
+    tfont.setPointSize(tfont.pointSize() + 4);
+    wiz_text_label_->setFont(tfont);
+    wiz_text_label_->setWordWrap(true);
+    wiz_text_label_->setStyleSheet("color: #205080;");
+    wiz_v->addWidget(wiz_step_label_);
+    wiz_v->addWidget(wiz_hint_label_);
+    wiz_v->addWidget(wiz_text_label_);
+    auto* marks_h = new QHBoxLayout();
+    for (int i = 0; i < 3; i++) {
+        wiz_marks_[i] = new QLabel(QString("段%1：未录").arg(i + 1), wizard_box_);
+        marks_h->addWidget(wiz_marks_[i]);
+    }
+    marks_h->addStretch(1);
+    wiz_v->addLayout(marks_h);
+    auto* wiz_btn_h = new QHBoxLayout();
+    wiz_rec_btn_ = new QPushButton("开始录音", wizard_box_);
+    wiz_sec_label_ = new QLabel("", wizard_box_);
+    wiz_cancel_btn_ = new QPushButton("取消向导", wizard_box_);
+    wiz_btn_h->addWidget(wiz_rec_btn_);
+    wiz_btn_h->addWidget(wiz_sec_label_);
+    wiz_btn_h->addStretch(1);
+    wiz_btn_h->addWidget(wiz_cancel_btn_);
+    wiz_v->addLayout(wiz_btn_h);
+    wizard_box_->setVisible(false);
+    vbox->addWidget(wizard_box_);
 
     // TTS 区
     auto* g_tts = new QGroupBox("TTS", this);
@@ -107,6 +147,18 @@ MainWindow::MainWindow() {
     connect(clear_btn_, &QPushButton::clicked, this, [this]() {
         QMetaObject::invokeMethod(engine_, "clearEnroll", Qt::QueuedConnection);
     });
+    connect(wizard_btn_, &QPushButton::clicked, this, [this]() {
+        QMetaObject::invokeMethod(engine_, "startWizard", Qt::QueuedConnection);
+    });
+    connect(wiz_rec_btn_, &QPushButton::clicked, this, [this]() {
+        if (recording_)
+            QMetaObject::invokeMethod(engine_, "stopRecord", Qt::QueuedConnection);
+        else
+            QMetaObject::invokeMethod(engine_, "startRecord", Qt::QueuedConnection);
+    });
+    connect(wiz_cancel_btn_, &QPushButton::clicked, this, [this]() {
+        QMetaObject::invokeMethod(engine_, "cancelWizard", Qt::QueuedConnection);
+    });
     connect(speak_btn_, &QPushButton::clicked, this, [this]() {
         QMetaObject::invokeMethod(engine_, "speakText", Qt::QueuedConnection,
                                   Q_ARG(QString, text_edit_->text()));
@@ -147,22 +199,74 @@ MainWindow::MainWindow() {
     });
     connect(engine_, &Engine::recordStateChanged, this, [this](bool on) {
         recording_ = on;
-        if (!on) rec_state_label_->clear();
+        if (!on) { rec_state_label_->clear(); rec_sec_ = 0.0; }
         updateButtons();
     });
     connect(engine_, &Engine::recordProgress, this, [this](double sec) {
+        rec_sec_ = sec;
         rec_state_label_->setText(QString("录音中 %1s / 15s").arg(sec, 0, 'f', 1));
+        if (wizard_mode_ && recording_) {
+            wiz_sec_label_->setText(QString("录音中 %1s").arg(sec, 0, 'f', 1));
+            // ≥3s 才允许手动停止
+            wiz_rec_btn_->setEnabled(sec >= 3.0);
+        }
+    });
+    // ---- 引导注册 ----
+    connect(engine_, &Engine::wizardStateChanged, this, [this](bool on) {
+        wizard_mode_ = on;
+        wizard_box_->setVisible(on);
+        if (!on) {
+            for (int i = 0; i < 3; i++) {
+                wiz_marks_[i]->setText(QString("段%1：未录").arg(i + 1));
+                wiz_marks_[i]->setStyleSheet("");
+            }
+            wiz_sec_label_->clear();
+        }
+        updateButtons();
+    });
+    connect(engine_, &Engine::wizardStepChanged, this, &MainWindow::updateWizardStep);
+    connect(engine_, &Engine::wizardSegmentAccepted, this, [this](int idx, double sec) {
+        if (idx >= 0 && idx < 3) {
+            wiz_marks_[idx]->setText(QString("段%1：✓ 已录入（%2s）").arg(idx + 1).arg(sec, 0, 'f', 1));
+            wiz_marks_[idx]->setStyleSheet("color: green;");
+        }
+        wiz_sec_label_->clear();
+    });
+    connect(engine_, &Engine::wizardSegmentRejected, this, [this](double sec) {
+        wiz_sec_label_->setText(QString("太短（%1s），请重录本段").arg(sec, 0, 'f', 1));
+    });
+    connect(engine_, &Engine::wizardFinished, this, [this](int n) {
+        wiz_sec_label_->setText(QString("注册完成（%1 段）✓").arg(n));
     });
 }
 
+void MainWindow::updateWizardStep(int step) {
+    if (step < 0 || step >= WizardController::kTotal) return;
+    wiz_step_label_->setText(QString("第 %1/3 段").arg(step + 1));
+    wiz_hint_label_->setText(QString::fromUtf8(WizardController::kSteps[step].hint));
+    wiz_text_label_->setText(QString::fromUtf8(WizardController::kSteps[step].text));
+    wiz_sec_label_->clear();
+}
+
 void MainWindow::updateButtons() {
-    listen_btn_->setEnabled(!listening_ && !recording_);
+    bool busy = listening_ || recording_ || wizard_mode_;
+    listen_btn_->setEnabled(!busy);
     stop_btn_->setEnabled(listening_);
-    rec_btn_->setEnabled(!listening_);
-    rec_btn_->setText(recording_ ? "停止录音" : "录音注册");
-    enroll_btn_->setEnabled(!listening_ && !recording_);
-    clear_btn_->setEnabled(!listening_ && !recording_);
-    wav_pick_btn_->setEnabled(!listening_ && !recording_);
+    rec_btn_->setEnabled(!listening_ && !wizard_mode_);
+    rec_btn_->setText(recording_ && !wizard_mode_ ? "停止录音" : "录音注册");
+    enroll_btn_->setEnabled(!busy);
+    clear_btn_->setEnabled(!busy);
+    wizard_btn_->setEnabled(!busy);
+    wav_pick_btn_->setEnabled(!busy);
+    speak_btn_->setEnabled(!wizard_mode_);
+    mic_radio_->setEnabled(!busy);
+    wav_radio_->setEnabled(!busy);
+    // 向导面板内：录音按钮在录音中需 ≥3s 才能点（由 recordProgress 控制），非录音时常开
+    if (wizard_mode_) {
+        wiz_rec_btn_->setText(recording_ ? "停止录音" : "开始录音");
+        wiz_rec_btn_->setEnabled(!recording_ || rec_sec_ >= 3.0);
+        wiz_cancel_btn_->setEnabled(!recording_);
+    }
 }
 
 MainWindow::~MainWindow() {
