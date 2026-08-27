@@ -47,6 +47,7 @@ add_library(core STATIC
     src/fbank.cpp
     src/speaker.cpp
     src/pvad.cpp
+    src/pvad_stream.cpp
     src/denoise.cpp
 )
 target_include_directories(core PUBLIC ${CMAKE_SOURCE_DIR}/src ${ORT_DIR}/include ${CMAKE_SOURCE_DIR}/third_party)

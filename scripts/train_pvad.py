@@ -86,9 +86,10 @@ MODELS = {"concat": PvadModel, "film": PvadModelFiLM, "attn": PvadModelAttn}
 
 
 class MixtureDataset(Dataset):
-    def __init__(self, mix_dir, max_n=None):
+    def __init__(self, mix_dir, max_n=None, feats_subdir="feats"):
         d = Path(mix_dir)
         self.dir = d
+        self.feat_dir = d / feats_subdir
         self.recs = load_labels(d / "labels.jsonl")
         if max_n:
             import random
@@ -96,7 +97,7 @@ class MixtureDataset(Dataset):
             self.recs = self.recs[:max_n]
         # 过滤缺失特征
         self.recs = [r for r in self.recs
-                     if (d / "feats" / f"{r['id']}.npy").exists()
+                     if (self.feat_dir / f"{r['id']}.npy").exists()
                      and (d / "emb" / f"{r['id']}.npy").exists()]
 
     def __len__(self):
@@ -104,7 +105,7 @@ class MixtureDataset(Dataset):
 
     def __getitem__(self, i):
         r = self.recs[i]
-        feats = np.load(self.dir / "feats" / f"{r['id']}.npy")
+        feats = np.load(self.feat_dir / f"{r['id']}.npy")
         emb = np.load(self.dir / "emb" / f"{r['id']}.npy")
         labels = np.asarray(r["labels"], dtype=np.int64)
         T = min(len(feats), len(labels))
@@ -181,14 +182,19 @@ def main():
     ap.add_argument("--save-all-epochs", action="store_true",
                     help="每个 epoch 都保存 checkpoint (<ckpt-stem>_epNN.pt), "
                          "供 F1-lambda*FAR 等准则事后选模")
+    ap.add_argument("--feats-subdir", default="feats",
+                    help="特征子目录 (ema 微调用 feats_ema)")
+    ap.add_argument("--init-from", default=None,
+                    help="从已有 checkpoint 初始化 (微调)")
     args = ap.parse_args()
 
     torch.set_num_threads(max(1, (os_cpu() or 8)))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    train_ds = MixtureDataset(args.train_dir, args.max_train or None)
-    val_ds = MixtureDataset(args.val_dir)
+    train_ds = MixtureDataset(args.train_dir, args.max_train or None,
+                              feats_subdir=args.feats_subdir)
+    val_ds = MixtureDataset(args.val_dir, feats_subdir=args.feats_subdir)
     print(f"train {len(train_ds)} 条, val {len(val_ds)} 条")
     train_ld = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                           collate_fn=collate, num_workers=args.workers,
@@ -197,6 +203,10 @@ def main():
                         collate_fn=collate, num_workers=0)
 
     model = MODELS[args.cond]().to(DEVICE)
+    if args.init_from:
+        _st = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        model.load_state_dict(_st["model"])
+        print(f"初始化自 {args.init_from} (ep{_st.get('epoch')})")
     n_params = sum(p.numel() for p in model.parameters())
     print(f"模型参数量: {n_params:,}")
     class_weight = torch.tensor([1.0, args.weight1, args.target_weight])

@@ -63,7 +63,8 @@ bool jfloats(const std::string& s, const char* key, std::vector<float>& out) {
 }  // namespace
 
 bool EnrollStore::save(const std::string& dir, const std::vector<SegRecord>& segs,
-                       const std::vector<float>& centroid, std::string& err) {
+                       const std::vector<float>& centroid, const std::vector<float>& fbank_mean,
+                       std::string& err) {
     try {
         std::filesystem::create_directories(dir);
         // tpl.bin（CLI v3 格式：仅正质心）
@@ -74,7 +75,14 @@ bool EnrollStore::save(const std::string& dir, const std::vector<SegRecord>& seg
         std::string path = dir + "/segments.json";
         FILE* f = fopen(path.c_str(), "wb");
         if (!f) { err = "cannot write " + path; return false; }
-        fprintf(f, "{\"segments\":[\n");
+        fprintf(f, "{");
+        if (!fbank_mean.empty()) {
+            fprintf(f, "\"fbank_mean\": [");
+            for (size_t j = 0; j < fbank_mean.size(); j++)
+                fprintf(f, "%s%.9g", j ? ", " : "", (double)fbank_mean[j]);
+            fprintf(f, "],\n");
+        }
+        fprintf(f, "\"segments\":[\n");
         for (size_t i = 0; i < segs.size(); i++) {
             const SegRecord& s = segs[i];
             fprintf(f, " {\"wav\": \"%s\", \"duration_s\": %.3f, \"time\": \"%s\", \"embedding\": [",
@@ -93,9 +101,10 @@ bool EnrollStore::save(const std::string& dir, const std::vector<SegRecord>& seg
 }
 
 bool EnrollStore::load(const std::string& dir, std::vector<SegRecord>& segs,
-                       bool& loaded, std::string& err) {
+                       std::vector<float>& fbank_mean, bool& loaded, std::string& err) {
     loaded = false;
     segs.clear();
+    fbank_mean.clear();
     std::string tpl_path = dir + "/tpl.bin";
     std::string seg_path = dir + "/segments.json";
     bool has_tpl = std::filesystem::exists(tpl_path);
@@ -116,6 +125,8 @@ bool EnrollStore::load(const std::string& dir, std::vector<SegRecord>& segs,
                 return false;
             }
             fclose(f);
+            // 可选根字段 fbank_mean
+            jfloats(text, "fbank_mean", fbank_mean);
             // 逐段解析：找 '"wav":' 出现的位置作为段起点
             size_t pos = 0;
             while (true) {

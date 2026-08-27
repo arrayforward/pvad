@@ -100,6 +100,25 @@ int Fbank::compute(const float* pcm, int num_samples, std::vector<float>& out) c
     return num_frames;
 }
 
+void Fbank::compute_one(const float* win400, float* out80) const {
+    // 与 compute() 单帧完全相同的窗口内处理（预加重/hamming/FFT/mel/log）
+    std::vector<float> re(opt_.fft_size), im(opt_.fft_size);
+    std::fill(re.begin(), re.end(), 0.f);
+    std::fill(im.begin(), im.end(), 0.f);
+    re[0] = win400[0] * window_[0];
+    for (int i = 1; i < opt_.frame_len; i++)
+        re[i] = (win400[i] - opt_.preemph * win400[i - 1]) * window_[i];
+    fft_inplace(re, im);
+    for (int b = 0; b < opt_.num_bins; b++) {
+        float e = 0.f;
+        for (auto& pr : mel_filters_[b]) {
+            float p = re[pr.first] * re[pr.first] + im[pr.first] * im[pr.first];
+            e += pr.second * p;
+        }
+        out80[b] = logf(std::max(e, 1e-10f));
+    }
+}
+
 void mean_normalize(std::vector<float>& feats, int num_frames, int num_bins) {
     for (int b = 0; b < num_bins; b++) {
         double sum = 0;

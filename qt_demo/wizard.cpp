@@ -12,6 +12,7 @@ const WizardStep WizardController::kSteps[WizardController::kTotal] = {
 
 void WizardController::start(DemoCore& core) {
     core.get_enroll_state(backup_sum_, backup_n_, backup_segs_);
+    core.get_fbank_state(backup_fsum_, backup_fframes_);
     core.clear_enroll();
     step_ = 0;
     active_ = true;
@@ -32,6 +33,7 @@ bool WizardController::accept_segment(DemoCore& core, const float* pcm, size_t n
 void WizardController::cancel(DemoCore& core) {
     if (!active_) return;
     core.set_enroll_state(backup_sum_, backup_n_, backup_segs_);
+    core.set_fbank_state(backup_fsum_, backup_fframes_);
     step_ = 0;
     active_ = false;
 }

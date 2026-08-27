@@ -39,6 +39,16 @@ public:
                         const std::string& wav = "", double duration_s = 0,
                         const std::string& time = "");
     void clear_enroll();
+    // enrollment 的 fbank 均值（流式 CMVN 先验用；空 = 不可用）
+    std::vector<float> fbank_mean() const;
+    void get_fbank_state(std::vector<double>& sum, size_t& frames) const {
+        sum = fbank_sum_;
+        frames = fbank_frames_;
+    }
+    void set_fbank_state(const std::vector<double>& sum, size_t frames) {
+        fbank_sum_ = sum;
+        fbank_frames_ = frames;
+    }
     // 注册状态备份/恢复（引导注册"取消则恢复旧质心"语义用）
     void get_enroll_state(std::vector<float>& emb_sum, int& n,
                           std::vector<SegRecord>& segs) const {
@@ -73,6 +83,8 @@ private:
     std::vector<float> centroid_;
     std::vector<float> emb_sum_;   // 注册集合：各段 embedding（L2 归一化）的累加
     std::vector<SegRecord> segs_;  // 逐段明细（持久化用）
+    std::vector<double> fbank_sum_;  // 注册音频 fbank 累加（80 维，流式 CMVN 先验用）
+    size_t fbank_frames_ = 0;
     int n_emb_ = 0;
     bool has_tpl_ = false;
     PvadGate gate_{0.5f, 0.2f, 2};

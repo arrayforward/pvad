@@ -27,13 +27,28 @@ def _get_embedder():
     return _EMBEDDER
 
 
+def cmvn_ema_np(x, alpha=0.02):
+    """因果 EMA 均值归一化 (流式部署一致)。"""
+    import numpy as np
+    out = np.empty_like(x)
+    m = np.zeros(x.shape[1], dtype=np.float64)
+    for t in range(len(x)):
+        m = (1 - alpha) * m + alpha * x[t]
+        out[t] = x[t] - m
+    return out
+
+
 def process_one(args):
-    uid, mix_path, enroll_path, feat_out, emb_out = args
+    uid, mix_path, enroll_path, feat_out, emb_out, cmvn_mode = args
     try:
         if not Path(feat_out).exists():
             from pvad_common import read_wav
             pcm, sr = read_wav(ROOT / mix_path)
-            feats = mean_normalize(fbank(pcm))
+            feats = fbank(pcm)
+            if cmvn_mode == "ema":
+                feats = cmvn_ema_np(feats.astype(np.float64)).astype(np.float32)
+            else:
+                feats = mean_normalize(feats)
             np.save(feat_out, feats.astype(np.float32))
         if not Path(emb_out).exists():
             from pvad_common import read_wav
@@ -49,15 +64,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--cmvn", choices=["full", "ema"], default="full",
+                    help="ema 时特征写入 feats_ema/ (流式因果 CMVN), emb 复用跳过")
     args = ap.parse_args()
 
     d = Path(args.dir).resolve()
     recs = load_labels(d / "labels.jsonl")
-    (d / "feats").mkdir(exist_ok=True)
+    feat_dir = "feats_ema" if args.cmvn == "ema" else "feats"
+    (d / feat_dir).mkdir(exist_ok=True)
     (d / "emb").mkdir(exist_ok=True)
     tasks = [(r["id"], r["path"], r["enrollment"],
-              str(d / "feats" / f"{r['id']}.npy"),
-              str(d / "emb" / f"{r['id']}.npy")) for r in recs]
+              str(d / feat_dir / f"{r['id']}.npy"),
+              str(d / "emb" / f"{r['id']}.npy"), args.cmvn) for r in recs]
     print(f"{d.name}: {len(tasks)} 条待预计算")
     errs = 0
     done = 0

@@ -102,7 +102,12 @@ pvad 门控只用正质心；`--neg`/`--cohort` 仅供 asnorm 门控。
 | `--mic` | — | 实时模式（miniaudio 采集 16k 单声道） |
 | `--template PATH` | `tpl.bin` | enroll 产物 |
 | `--gate pvad\|asnorm` | `pvad` | 门控模式。pvad 双讲场景远优于 asnorm |
-| `--pvad-model PATH` | `models/pvad/pvad_v4.onnx` | PVAD 模型（默认 v4；版本切换见 4.4） |
+| `--pvad-model PATH` | `models/pvad/pvad_v4.onnx` | PVAD 模型（默认 v4；版本切换见 4.4）。离线/批量用 |
+| `--pvad-stream-model PATH` | `models/pvad/pvad_v4_stream.onnx` | 实时流式模型（GRU state 外置；`--mic`/`--wav-stream` 用） |
+| `--enroll-wav PATH` | — | 流式 CMVN 先验来源（enrollment 音频，显著抑制冷启动假阳，见 5.2） |
+| `--warmup-frames` | 50 | 流式 warm-up 帧数（0.5s，期间不门控） |
+| `--wav-stream` | off | 隐藏模式：离线文件走流式路径（与整段 --wav 对照正确性） |
+| `--bench-stream` | — | 实测流式 vs 全段重算单帧耗时后退出 |
 | `--pvad-threshold` | 0.5 | P(target) 触发阈值。降 FAR 可试 0.6 |
 | `--pvad-hyst` | 0.2 | 低于 threshold−hyst 计数清零 |
 | `--confirm` | 2 | 连续 N 次满足才触发。降误打断可试 3–5 |
@@ -206,10 +211,11 @@ windeployqt 自动拷贝；sherpa/onnxruntime DLL 一并拷贝（onnxruntime.dll
 - **TTS 区**：文本框 + `朗读`：合成（Engine 线程，不卡 UI）→ miniaudio 播放；无播放设备时
   自动降级为虚拟播放（状态机一致，便于无头环境）
 - **监听区**：`开始监听`/`停止`；音源二选一：
-  - **麦克风**：真实采集（流式 PVAD，0.5s warm-up）。**背压降载**：流式打分成本随流长
-    增长，当采集积压 >1s 时自动丢弃最旧音频（保留最新 0.5s），优先保证 UI 响应与实时性
-    （门控作用在处理后的帧序列上，confirm 语义不变）；降载时日志区有节流提示，
-    处理率低于标称 95% 时看门狗每 10s 告警一次
+  - **麦克风**：真实采集（流式 PVAD：chunked GRU state 复用 + EMA CMVN，每帧 O(1)
+    增量推理，稳态 ~0.03ms/帧；0.5s warm-up 不门控）。**背压降载**（保护机制，
+    流式后几乎不触发）：当采集积压 >1s 时自动丢弃最旧音频（保留最新 0.5s），
+    优先保证 UI 响应与实时性（门控作用在处理后的帧序列上，confirm 语义不变）；
+    降载时日志区有节流提示，处理率低于标称 95% 时看门狗每 10s 告警一次
   - **WAV 注入**：选 wav 模拟麦克风（整段预计算，可复现；约 2 倍速灌入）
   - `启用降噪` 勾选框（**默认开**）：RNNoise 实时降噪，对麦克风和 WAV 注入都生效，
     新增延迟约 11ms。回滚：取消勾选（运行时），或 `git revert` 默认开那次 commit（代码级）
@@ -255,12 +261,22 @@ python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-### 5.2 实时/流式路径的 warm-up 与 P(target) 虚高
+### 5.2 实时/流式路径的 warm-up、CMVN 先验与 SAPI 域注意
 
-PVAD 训练用**整段均值归一化**；流式只能用前缀归一化，前 ~0.5s 统计不稳会把
-P(target) 抬高（实测非注册 voice2 流式开头帧 0.49→0.59，TTS 回声 0.50→0.73）。
-处置：WAV 注入/离线一律走整段预计算；麦克风流式路径 0.5s warm-up（报数不门控）。
-**绝对不要**按 0.5s 短窗每窗重置 GRU（短窗陷阱，见 DESIGN.md 4.3）。
+实时流式路径（`pvad_v4_stream.onnx`）用 **EMA CMVN**（α=0.02，因果指数滑动均值），
+会话起始 0.5s（50 帧）warm-up 不门控。要点：
+
+- **CMVN 先验**：EMA 从 0 起步时前 ~0.5-1.5s 特征未归一化，SAPI 合成音上会造成
+  冷启动假阳（B/echo 也短暂高 P）。给 CLI 传 `--enroll-wav <注册音频>` 让 EMA 从
+  enrollment 的 fbank 均值起步（qt_demo 注册时自动累计先验并随 segments.json 持久化，
+  无需手动操作）；先验显著抑制冷启动（echo 假阳帧 152→0）
+- **SAPI 域限制**：v4s 对 SAPI 注册人的目标证据集中在前 ~0.35s，会被 0.5s warm-up
+  挡住（A 漏触发）；真实人声无此问题。SAPI 验证走整段路径（--wav / auto-test），
+  流式正确性以真实人声混合物为准（python 流式 e2e 94.5%/82.5%）
+- 相关参数：`--pvad-stream-model`、`--enroll-wav`、`--warmup-frames`、`--wav-stream`
+  （离线文件走流式路径做正确性对照）、`--bench-stream`（新旧路径单帧耗时对比）
+- 历史包袱：旧实时路径每 10ms 全段重算（8s 段长处 11.54ms/帧超实时），已被
+  PvadStream（稳态 0.029ms/帧）取代
 
 ### 5.3 SAPI 合成音的两个坑
 

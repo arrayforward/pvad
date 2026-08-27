@@ -11,12 +11,11 @@
 
 class EnrollStore {
 public:
-    // 全量重写 tpl.bin + segments.json
+    // 全量重写 tpl.bin + segments.json（fbank_mean 可为空）
     static bool save(const std::string& dir, const std::vector<SegRecord>& segs,
-                     const std::vector<float>& centroid, std::string& err);
-    // 加载。loaded=false 表示没有可加载内容（目录/文件不存在，正常初始状态）；
-    // 返回 false 表示存在但损坏（err 有原因，调用方应降级为空注册）。
-    // 仅 tpl.bin 存在（如 CLI enroll 产物导入）时，以正质心作为单段恢复。
+                     const std::vector<float>& centroid, const std::vector<float>& fbank_mean,
+                     std::string& err);
+    // 加载。fbank_mean 为空表示未存（旧格式/CLI 导入）。
     static bool load(const std::string& dir, std::vector<SegRecord>& segs,
-                     bool& loaded, std::string& err);
+                     std::vector<float>& fbank_mean, bool& loaded, std::string& err);
 };

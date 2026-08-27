@@ -6,11 +6,13 @@
 #include "fbank.h"
 #include "gate.h"
 #include "pvad.h"
+#include "pvad_stream.h"
 #include "speaker.h"
 #include "vad.h"
 #include "wav_io.h"
 #include <chrono>
 #include <cstdio>
+#include <tuple>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -31,9 +33,13 @@ struct Args {
     std::string vad_model = "models/silero_vad.onnx";
     std::string spk_model = "models/campplus.onnx";
     std::string pvad_model = "models/pvad/pvad_v4.onnx";
+    std::string pvad_stream_model = "models/pvad/pvad_v4_stream.onnx";  // 实时流式专用
     std::string gate_mode = "pvad";   // pvad (默认) | asnorm
     std::string denoise = "rnnoise";  // rnnoise (默认) | off
     bool bench_denoise = false;
+    bool bench_stream = false;
+    bool wav_stream = false;          // 隐藏模式：离线文件走流式路径（正确性验证）
+    std::string enroll_wav;           // 可选：流式 CMVN 先验来源（enrollment 音频）
     float pvad_threshold = 0.5f;
     float pvad_hyst = 0.2f;
     float threshold = 0.55f;
@@ -44,6 +50,7 @@ struct Args {
     float vad_threshold = 0.5f;
     int confirm = 2;
     int window_ms = 500;
+    int warmup_frames = 50;   // 流式 warm-up（帧），--warmup-frames 可调
     int seconds = 30;
 };
 
@@ -57,7 +64,9 @@ options:
   --pvad-hyst 0.2     pvad 模式: 低于 threshold-hyst 计数清零
   --pvad-model PATH   pvad.onnx 路径（默认 pvad_v4.onnx）
   --denoise rnnoise   降噪: rnnoise (默认, RNNoise) | off (回滚/对比用)
+  --pvad-stream-model PATH  实时流式模型（默认 pvad_v4_stream.onnx）
   --bench-denoise     测降噪单帧耗时后退出
+  --bench-stream      实测流式 vs 全段重算单帧耗时后退出
   --threshold 0.55    asnorm no-norm 模式: sA_raw 触发阈值
   --z-threshold 3.0   norm 模式: sA_norm=(sA_raw-mu)/sigma 触发阈值
   --norm-topk 50      t-norm 取 cohort 相似度 top-K 估计 mu/sigma
@@ -89,6 +98,10 @@ Args parse_args(int argc, char** argv) {
         else if (s == "--pvad-threshold") a.pvad_threshold = std::stof(next("0.5"));
         else if (s == "--pvad-hyst") a.pvad_hyst = std::stof(next("0.2"));
         else if (s == "--pvad-model") a.pvad_model = next("");
+        else if (s == "--pvad-stream-model") a.pvad_stream_model = next("");
+        else if (s == "--wav-stream") a.wav_stream = true;
+        else if (s == "--enroll-wav") a.enroll_wav = next("");
+        else if (s == "--bench-stream") a.bench_stream = true;
         else if (s == "--denoise") a.denoise = next("off");
         else if (s == "--bench-denoise") a.bench_denoise = true;
         else if (s == "--threshold") a.threshold = std::stof(next("0.55"));
@@ -99,6 +112,7 @@ Args parse_args(int argc, char** argv) {
         else if (s == "--vad-threshold") a.vad_threshold = std::stof(next("0.5"));
         else if (s == "--confirm") a.confirm = std::stoi(next("2"));
         else if (s == "--window-ms") a.window_ms = std::stoi(next("500"));
+        else if (s == "--warmup-frames") a.warmup_frames = std::stoi(next("50"));
         else if (s == "--seconds") a.seconds = std::stoi(next("30"));
         else if (s == "--vad-model") a.vad_model = next("");
         else if (s == "--spk-model") a.spk_model = next("");
@@ -266,7 +280,164 @@ int run_offline(const Args& a) {
     return 0;
 }
 
-// ---------------- 实时模式 ----------------
+// ---------------- 实时流式路径（PvadStream：chunked GRU state 复用 + EMA CMVN） ----------------
+// 与整段路径完全不同的推理形态：每 10ms 帧 O(1) 增量计算（单帧 fbank + 5 帧 chunk GRU），
+// 替代旧的"每帧全段重算"（成本随流长超线性增长）。silero VAD speech-end 处重置会话。
+struct StreamRunner {
+    Vad vad;
+    PvadStream stream;
+    PvadGate gate;
+    Fbank fbank;
+    std::deque<float> win;  // 最近 480 采样（fbank 25ms 窗 + 对齐）
+    float vad_threshold;
+    bool prev_speech = false;
+
+    StreamRunner(const Args& a, const std::vector<float>& emb)
+        : vad(a.vad_model), stream(a.pvad_stream_model),
+          gate(PvadGate{a.pvad_threshold, a.pvad_hyst, a.confirm}),
+          vad_threshold(a.vad_threshold) {
+        stream.set_emb(emb.data());
+        stream.set_warmup((size_t)a.warmup_frames);
+        // 可选 CMVN 先验：从 enrollment 音频算 fbank 均值（显著抑制冷启动假阳）
+        if (!a.enroll_wav.empty()) {
+            WavData ew = read_wav(a.enroll_wav);
+            std::vector<float> feats;
+            int T = fbank.compute(ew.samples.data(), (int)ew.samples.size(), feats);
+            if (T > 0) {
+                float m[80] = {0};
+                for (int t = 0; t < T; t++)
+                    for (int b = 0; b < 80; b++) m[b] += feats[(size_t)t * 80 + b];
+                for (int b = 0; b < 80; b++) m[b] /= T;
+                stream.set_cmvn_prior(m);
+                printf("[stream] CMVN prior from %s (%d frames)\n", a.enroll_wav.c_str(), T);
+            }
+        }
+    }
+
+    // 返回 (分数, 是否触发)；时间戳/帧号一律用 o.frame（分数对应的绝对帧号，
+    // 推理有 0-4 帧滞后，不能用推入帧号当时间戳）
+    std::pair<PvadStream::Out, bool> process(const float* frame160, double t) {
+        float vp = vad.process(frame160, 160);
+        if (vp >= 0.f) {
+            bool sp = vp > vad_threshold;
+            if (sp != prev_speech) {
+                printf("[t=%6.2f] VAD %s (p=%.3f)\n", t, sp ? "speech start" : "speech end  ", vp);
+                // 注意：speech-end 只复位门控计数，不重置 GRU/EMA——
+                // python 评估是整流单会话；中途重置会产生二次冷启动假阳（实测 voice1b
+                // 在 t≈1.0 的误触发即来源于此）
+                if (prev_speech && !sp) gate.reset();
+                prev_speech = sp;
+            }
+        }
+        for (int i = 0; i < 160; i++) win.push_back(frame160[i]);
+        // fbank 帧 f 覆盖 [f*160, f*160+400)：每收满一帧可新算一帧。
+        // 窗口起点须对齐 160 网格：保留最近 480 采样，取前 400 为一帧。
+        if (win.size() < 480) return {PvadStream::Out{}, false};
+        float w[400], f80[80];
+        std::copy(win.begin(), win.begin() + 400, w);
+        fbank.compute_one(w, f80);
+        win.erase(win.begin(), win.begin() + 160);
+        auto o = stream.push_frame(f80);
+        bool fire = false;
+        if (o.valid && o.gated) fire = gate.update(o.p);
+        return {o, fire};
+    }
+};
+
+// 隐藏模式：离线文件走流式路径（流式正确性验证，与整段 --wav 对照）
+int run_wav_stream(const Args& a) {
+    WavData wd = read_wav(a.wav);
+    std::vector<float> samples = wd.samples;
+    Template tpl = load_template(a.tpl);
+    Denoise den;
+    if (a.denoise == "rnnoise") {
+        std::vector<float> out(samples.size());
+        size_t nf = samples.size() / 160;
+        for (size_t i = 0; i < nf; i++) den.process(&samples[i * 160], &out[i * 160]);
+        samples = std::move(out);
+    }
+    StreamRunner runner(a, tpl.pos);
+    printf("wav-stream: %s (%.2fs), model=%s, denoise=%s\n", a.wav.c_str(),
+           samples.size() / 16000.0, a.pvad_stream_model.c_str(), a.denoise.c_str());
+    size_t n = samples.size() / 160;
+    int first = -1;
+    float maxp = 0.f;
+    for (size_t i = 0; i < n; i++) {
+        auto [o, fire] = runner.process(&samples[i * 160], i * 0.01);
+        if (o.p > maxp) maxp = o.p;
+        if (fire && first < 0) first = (int)o.frame;
+        if (o.valid && o.gated)
+            printf("[t=%6.2f] p_target=%.4f consec=%d%s\n", o.frame * 0.01, o.p,
+                   runner.gate.consec(), fire ? "  >>> INTERRUPT <<<" : "");
+    }
+    printf("wav-stream done: first_trigger_frame=%d max_p=%.4f\n", first, maxp);
+    return 0;
+}
+
+// 性能实测：旧路径（每帧全段重算）vs 新路径（流式 chunk 推理）
+int run_bench_stream(const Args& a) {
+    WavData wd = read_wav(a.wav.empty() ? "test_audio/voice1b.wav" : a.wav);
+    Template tpl = load_template(a.tpl);
+    printf("bench-stream: 旧=每帧全段重算(8s 段封顶)  新=PvadStream chunk=5\n");
+
+    // 旧路径：不同段长处的单帧耗时（fbank 全段 + 均值归一化 + PVAD 整段）
+    {
+        Pvad pvad(a.pvad_model);
+        Fbank fbank;
+        for (int seg_frames : {100, 200, 400, 800}) {  // 1s/2s/4s/8s（旧实现段封顶 8s）
+            size_t seg_n = (size_t)seg_frames * 160 + 240;
+            if (seg_n > wd.samples.size()) seg_n = wd.samples.size();
+            std::vector<float> seg(wd.samples.begin(), wd.samples.begin() + seg_n);
+            // 预热
+            {
+                std::vector<float> feats;
+                int T = fbank.compute(seg.data(), (int)seg.size(), feats);
+                mean_normalize(feats, T, 80);
+                pvad.target_probs(feats.data(), T, tpl.pos.data());
+            }
+            auto t0 = std::chrono::steady_clock::now();
+            const int N = 20;
+            for (int k = 0; k < N; k++) {
+                std::vector<float> feats;
+                int T = fbank.compute(seg.data(), (int)seg.size(), feats);
+                mean_normalize(feats, T, 80);
+                pvad.target_probs(feats.data(), T, tpl.pos.data());
+            }
+            auto t1 = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / N;
+            printf("  旧路径 @ 段长 %4d 帧 (%3.1fs): %7.2f ms/帧（预算 10ms）%s\n", seg_frames,
+                   seg_frames / 100.0, ms, ms > 10.0 ? "  <-- 超实时" : "");
+        }
+    }
+    // 新路径：稳态单帧耗时
+    {
+        PvadStream stream(a.pvad_stream_model);
+        stream.set_emb(tpl.pos.data());
+        Fbank fbank;
+        std::deque<float> win;
+        float f80[80];
+        auto t0 = std::chrono::steady_clock::now();
+        size_t nf = wd.samples.size() / 160;
+        size_t measured = 0;
+        for (size_t i = 0; i < nf; i++) {
+            for (int j = 0; j < 160; j++) win.push_back(wd.samples[i * 160 + j]);
+            if (win.size() < 480) continue;
+            float w[400];
+            std::copy(win.begin(), win.begin() + 400, w);
+            fbank.compute_one(w, f80);
+            win.erase(win.begin(), win.begin() + 160);
+            stream.push_frame(f80);
+            measured++;
+        }
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / measured;
+        printf("  新路径 稳态（含单帧 fbank+EMA CMVN+chunk GRU 摊销）: %.4f ms/帧（%zu 帧实测）\n",
+               ms, measured);
+    }
+    return 0;
+}
+
+
 struct Ring {
     std::mutex mu;
     std::deque<float> q;
@@ -303,7 +474,6 @@ void playback_cb(ma_device* dev, void* out, const void* in, ma_uint32 frames) {
 }
 
 int run_realtime(const Args& a) {
-    Pipeline pipe(a);
     printf("realtime: mic @16k mono, gate=%s, AEC=%s, confirm=%d window=%dms, run %ds%s\n",
            a.gate_mode.c_str(), a.aec ? "on" : "off", a.confirm, a.window_ms, a.seconds,
            a.play_tone ? ", play-tone on" : "");
@@ -340,14 +510,40 @@ int run_realtime(const Args& a) {
 
     double t = 0;
     int total_frames = a.seconds * 100;
-    for (int f = 0; f < total_frames;) {
-        float frame[160], far_wav[160];
-        if (!g_mic_ring.pop(frame, 160)) { ma_sleep(2); continue; }
-        const float* far_ptr = nullptr;
-        if (pb_ok && g_far_ring.pop(far_wav, 160)) far_ptr = far_wav;
-        pipe.process_frame(frame, far_ptr, t);
-        t += 0.01;
-        f++;
+    if (a.gate_mode == "pvad") {
+        // 实时流式路径：PvadStream（chunked GRU state 复用），每帧 O(1) 增量
+        Template tpl = load_template(a.tpl);
+        StreamRunner runner(a, tpl.pos);
+        Denoise den;
+        bool use_den = (a.denoise == "rnnoise");
+        Aec aec(160, 2048, 16000);
+        for (int f = 0; f < total_frames;) {
+            float frame[160], far_wav[160];
+            if (!g_mic_ring.pop(frame, 160)) { ma_sleep(2); continue; }
+            const float* far_ptr = nullptr;
+            if (pb_ok && g_far_ring.pop(far_wav, 160)) far_ptr = far_wav;
+            const float* src = frame;
+            float dn[160], clean[160];
+            if (use_den) { den.process(frame, dn); src = dn; }
+            if (a.aec && far_ptr) { aec.process(src, far_ptr, clean); src = clean; }
+            auto [o, fire] = runner.process(src, t);
+            if (o.valid && o.gated)
+                printf("[t=%6.2f] p_target=%.4f consec=%d%s\n", o.frame * 0.01, o.p,
+                       runner.gate.consec(), fire ? "  >>> INTERRUPT <<<" : "");
+            t += 0.01;
+            f++;
+        }
+    } else {
+        Pipeline pipe(a);
+        for (int f = 0; f < total_frames;) {
+            float frame[160], far_wav[160];
+            if (!g_mic_ring.pop(frame, 160)) { ma_sleep(2); continue; }
+            const float* far_ptr = nullptr;
+            if (pb_ok && g_far_ring.pop(far_wav, 160)) far_ptr = far_wav;
+            pipe.process_frame(frame, far_ptr, t);
+            t += 0.01;
+            f++;
+        }
     }
 
     ma_device_uninit(&cap);
@@ -456,6 +652,8 @@ int main(int argc, char** argv) {
             return 0;
         }
         if (a.mic) return run_realtime(a);
+        if (a.bench_stream) return run_bench_stream(a);
+        if (a.wav_stream) return run_wav_stream(a);
         if (!a.batch_list.empty()) return run_batch(a);
         if (!a.wav.empty()) return run_offline(a);
         usage();

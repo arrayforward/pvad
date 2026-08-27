@@ -160,18 +160,45 @@ checkpoint 选择不能只看帧级指标（val loss/F1/FAR），三次实证：
 `p < 0.5 − hyst`（hyst=0.2）清零复位。与 python 评估（`scripts/eval_pvad.py`）逐参数一致。
 5 帧中值滤波在 v3 上收益边际（误打断 7.0%→6.6%），C++ 端未加。
 
-### 4.2 整段 vs 流式前缀归一化
+### 4.2 整段 vs 流式（chunked GRU state 复用，当前实现）
 
-PVAD 训练用**整段** per-utterance 均值归一化，GRU 零初始状态跑完整段。两种部署形态：
+PVAD 整段路径（离线/WAV 注入/回归/auto-test，用 `pvad_v4.onnx`）：整段音频一次
+fbank + 整段均值归一化 + 单次 GRU 前向，与训练/python 评估完全一致。
 
-- **离线/文件注入（精确形态）**：整段音频一次 fbank + 整段均值归一化 + 单次 GRU 前向，
-  与训练/python 评估完全一致；
-- **实时流式（近似形态）**：流起始至今（封顶 8s）整段重算 GRU，均值归一化只能用
-  **前缀统计**。前缀统计在前 ~0.5s 不稳定，会把 P(target) 抬高（实测：非注册 voice2
-  整段 0.486 → 流式开头帧 0.593；TTS 回声 0.500 → 0.732）。处置：流式 0.5s warm-up
-  （报数但不更新门控）。
+**实时流式路径**（CLI `--mic`、qt_demo 麦克风，用 `pvad_v4_stream.onnx`，GRU 隐状态
+外置）：每 10ms 帧 O(1) 增量——单帧 fbank（25ms 窗对齐 160 网格）→ EMA CMVN
+（α=0.02，会话起始可用 enrollment fbank 均值作先验 `set_cmvn_prior`）→ 每 5 帧
+（50ms）一次 chunk 推理，hN 回传为下一 chunk 的 h0。会话起始 0.5s warm-up 不门控
+（`--warmup-frames` 可调）；silero VAD speech-end 只复位门控计数、**不重置 GRU/EMA**
+（中途重置会造成二次冷启动假阳，实测见 4.4）。
 
-### 4.3 短窗陷阱（重要，有数值记录）
+历史包袱（已解决）：旧实时路径是"每 10ms 帧对整段（封顶 8s）重算 fbank+GRU"，
+成本随流长增长（实测 1s/2s/4s/8s 段长处单帧 1.56/2.95/5.82/11.54ms，8s 超实时预算，
+曾导致 GUI 事件循环饿死）；前缀均值归一化在前 ~0.5s 不稳会把 P(target) 抬高
+（非注册 voice2 开头帧 0.49→0.59，TTS 回声 0.50→0.73）。PvadStream 替换后稳态
+**0.029 ms/帧（常数级）**，背压机制保留作保护但几乎不再触发。
+
+### 4.3 流式冷启动与 SAPI 域问题（重要，有数值记录）
+
+流式（EMA CMVN + chunk state）集成时发现并修复/记录的问题：
+
+- **冷启动假阳**：EMA 从 0 起步时前 ~0.5-1.5s 特征未归一化，v4s 模型在 **SAPI 合成音**
+  上对所有说话人都给高 P(target)（python onnxruntime 双边验证：voice2 前 66 帧、
+  echo 前 162 帧 P>0.5）。处置：EMA 用 **enrollment fbank 均值先验**起步
+  （`set_cmvn_prior`；python 验证 echo 假阳帧 152→0、voice2 48→9），CLI 用
+  `--enroll-wav` 提供，qt_demo 注册时自动累计并随 segments.json 持久化。
+- **推理滞后对齐**：chunk=5 推理天然有 0-4 帧滞后，分数必须按**绝对帧号**（`Out.frame`）
+  对齐/门控/打时间戳，不能用推入帧号（否则 blip 会越过 warm-up 边界造成误判）。
+- **中途重置陷阱**：VAD speech-end 处若重置 GRU/EMA（"每段新会话"），会产生二次冷启动
+  假阳（voice1b 在 t≈1.0 的误触发实测来源于此）。正确语义是**整流单会话**（与 python
+  eval_stream.py 一致），speech-end 只复位门控 consec。
+- **SAPI 域限制（未解）**：即便有先验，v4s 对 SAPI 注册人的目标证据也只在前 ~0.35s
+  （voice1b P>0.5 集中在帧 10-35，之后塌缩到 ~0）——0.5s warm-up 会恰好挡住这段证据，
+  SAPI 上 A 漏触发。真实人声无此问题（python 流式 e2e 干净 94.5%/增广 82.5%，
+  与整段基线仅差 0.5pp）。**SAPI 合成音的流式正确性用整段路径验证**（auto-test 不变），
+  流式路径的正确性以真实人声混合物为准。
+
+### 4.4 短窗陷阱（重要，有数值记录）
 
 一个看似自然但**错误**的集成方式：对最近 0.5s 滑窗跑 PVAD、每窗重置 GRU。
 实测（python onnxruntime 与 C++ 双边验证，逐帧一致）：非目标说话人 voice2 的
@@ -353,11 +380,9 @@ CLI 同语义 0.64 触发），修为每文件新实例后与 CLI 逐位一致�
 
 1. **增广条件误打断仍高**：v4 增广 e2e 误打断 16.4%（干净已压到 5.0%/C++ 1.5%），
    强噪声/混响下的假阳性是主要剩余问题；
-2. **域外余量**：SAPI 合成音上注册余量薄（voice1b 仅 ~7 帧 P>0.5；v4 在该域
-   A/B/echo 的 P 都更贴近阈值），真实麦克风语音应更好但需实测；
-3. **流式路径为原型形态**：实时每 10ms 整段重算 GRU + 前缀归一化近似
-   （0.5s warm-up），CPU 随流长增长；
-4. **门控无全局冷却**：连续长语音中可多次触发 INTERRUPT（按段复位）。
+2. **域外余量**：SAPI 合成音上注册余量薄（整段 voice1b 仅 ~7 帧 P>0.5；流式路径
+   在 SAPI 上另有冷启动/证据前移问题，见 4.3 节），真实麦克风语音应更好但需实测；
+3. **门控无全局冷却**：连续长语音中可多次触发 INTERRUPT（按段复位）。
 
 **路线图（剩余项）**
 
@@ -365,11 +390,11 @@ CLI 同语义 0.64 触发），修为每文件新实例后与 CLI 逐位一致�
    `--cond attn` 已就绪；
 2. **e2e 写进训练目标**：选模三次证明帧级指标≠门控表现（3.5 节），把 e2e 正确率
    直接作为 checkpoint 选择/早停准则；
-3. **流式 GRU state 导出**：导出带隐藏状态输入输出的模型，跨步复用替代整段重算，
-   配运行 CMVN；
-4. **真实 tts_server gRPC 接入**：qt_demo 目前用本地 VITS 模型直读（sherpa-onnx），
+3. **真实 tts_server gRPC 接入**：qt_demo 目前用本地 VITS 模型直读（sherpa-onnx），
    生产接回 tts_server 的 gRPC（WSL Linux 服务，Windows 侧接 gRPC 成本是当时绕开的原因）。
 
-**已完成（存档）**：F1−λ·FAR 联合选模（v4 已实施并引出 val e2e 选模的最终准则）；
+**已完成（存档）**：**流式 GRU state 复用**（PvadStream：chunk=5 + EMA CMVN +
+enrollment 先验，稳态 0.029 ms/帧 替代旧路径 8s 段长 11.54 ms/帧的超实时重算，
+python 流式 e2e 与整段仅差 0.5pp）；F1−λ·FAR 联合选模（v4 已实施并引出 val e2e 选模的最终准则）；
 硬负例扩充（v4 易混淆负样本 2000 条，FAR 干净 0.276→0.210）；RNNoise 前置降噪
 （默认开）；cohort 归一化（AS-norm 基线，现为对照路径）。

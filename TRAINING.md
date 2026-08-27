@@ -320,3 +320,48 @@ C++ 口径（pvad+rnnoise，各 200 条）：v4 干净 **97.5%**（误 1.5%）�
 复训/评估命令：`train_pvad.py --cond film --save-all-epochs ...`（同第 6 节，
 数据换 `data/mixtures_v4/`）；易混淆负样本见 `scripts/build_speaker_centroids.py`
 与 `scripts/build_v4_data.py`。
+
+---
+
+## 10. 流式导出（pvad_v4_stream.onnx，2026-08-27）
+
+### 方法
+GRU 隐状态外置（`scripts/export_stream_onnx.py`）：forward 签名
+`(feats_chunk[B,t,80], emb[B,192], h0[2,B,128]) → (logits[B,t,3], hN[2,B,128])`，
+初始 h0=0，chunk 间 state 串接。CMVN 不进 ONNX，由调用方负责。
+opset 17。chunk=1/5/50 与整段数学等价（2.62e-06，数值噪声级）。
+
+### CMVN 流式化：五方案实测与最终选择（关键风险点）
+整段 per-bin 均值归一化需要未来信息，流式只能因果近似。各 200 条 e2e
+（confirm=2、±20 帧）对整段基线（干净 95.0% / 增广 83.0%）的正确率：
+
+| 方案 | 干净 | 增广 | 结论 |
+|---|---|---|---|
+| running（累积均值） | 20.5% | 36.0% | 灾难：均值未收敛期全漏 |
+| sliding 3s | 19.5% | 39.0% | 同上 |
+| EMA α=0.02 | 82.5% | 89.0% | 最好但干净 -12.5pp，不达标 |
+| EMA α=0.05 / 0.1 | 74.0% / 56.5% | 82.0% / 62.5% | 更快收敛反而更差 |
+| running+enrollment 先验 | 69.5% | 67.5% | 先验把均值拉离混合分布，有害 |
+| **EMA α=0.02 + EMA 特征微调（最终）** | **94.5%** | **82.5%** | **两条件均 -0.5pp，达标** |
+
+结论：**CMVN 技巧无法绕过训练/部署不一致**，正解是让训练分布与部署一致——
+从 best_v4.pt 以 EMA-CMVN 特征（α=0.02）微调 4 epoch（lr 1e-4，
+`train_pvad.py --feats-subdir feats_ema --init-from`，checkpoint best_v4s.pt），
+再从微调权重导出流式 ONNX。注意：此时流式模型与离线整段模型（pvad_v4.onnx）
+已是不同权重，离线仍用 v4 整段模型，实时用 stream 模型，两者各司其职。
+
+### warm-up 建议
+EMA 时间常数 50 帧（0.5s）。微调后模型对早期未收敛统计鲁棒，
+3-8s 短片段（语音从头开始的最坏情况）退化仅 0.5pp；C++ 侧建议：
+会话起始 0.5s 内不做门控判定（或接受该窗口内略高的漏检）。
+
+### 流式 vs 整段 e2e（EMA α=0.02, chunk=5, 各 200 条）
+
+| 条件 | 整段基线 | 流式（微调后） | 退化 |
+|---|---|---|---|
+| v1 干净 | 95.0% | **94.5%**（漏 1.0%/误 4.5%） | -0.5pp ✓ |
+| v2 增广 | 83.0% | **82.5%**（漏 0.0%/误 17.5%） | -0.5pp ✓ |
+
+交付：`models/pvad/pvad_v4_stream.onnx` + `pvad_v4_stream.md`（接口与 CMVN 约定）、
+`scripts/export_stream_onnx.py`、`scripts/eval_stream.py`（CMVN 分析 + 流式 e2e）、
+`models/pvad/best_v4s.pt`（EMA 微调 checkpoint）+ `train_log_v4s.json`。

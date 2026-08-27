@@ -12,6 +12,8 @@
 #include "demo_core.h"
 #include "denoise.h"
 #include "enroll_store.h"
+#include "fbank.h"
+#include "pvad_stream.h"
 #include "tts.h"
 #include "wizard.h"
 #include <miniaudio.h>
@@ -66,6 +68,7 @@ private:
     void handleEvent(const FrameEvent& ev);
     void finishRecord();
     void persistEnrollment();       // 注册状态变化后落盘 enrollment/
+    void refreshStreamEnroll();     // 同步流式 PVAD 的 emb/CMVN 先验
     QString enrollmentDir() const;  // <root>/qt_demo/enrollment
 
     DemoCore core_;
@@ -99,6 +102,11 @@ private:
 
     QTimer* timer_ = nullptr;
     bool interrupt_latched_ = false;      // 本次监听是否已触发过（日志只记首次，之后仍上报数值）
+    // 实时流式 PVAD（chunked GRU state 复用 + EMA CMVN），麦克风路径专用
+    std::unique_ptr<PvadStream> stream_;
+    PvadGate sgate_{0.5f, 0.2f, 2};
+    std::deque<float> swin_;              // fbank 对齐窗（480 采样）
+    Fbank sfbank_;
     // 背压/节流状态
     size_t drop_acc_ = 0;                 // 自上次日志以来丢弃的采样数
     qint64 last_drop_log_ms_ = 0;

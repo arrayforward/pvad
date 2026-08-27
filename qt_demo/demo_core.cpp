@@ -40,19 +40,21 @@ void DemoCore::append_segment(const std::vector<float>& emb, const std::string& 
 
 bool DemoCore::enroll(const std::vector<std::string>& wavs, std::string& err) {
     if (!spk_) { err = "core not initialized"; return false; }
-    try {
-        int added = 0;
-        for (auto& w : wavs) {
+    int added = 0;
+    for (auto& w : wavs) {
+        try {
             WavData wd = read_wav(w);
-            auto emb = spk_->embed(wd.samples.data(), (int)wd.samples.size());
-            append_segment(emb, w, wd.samples.size() / 16000.0, now_str());
+            // 走 enroll_samples 统一路径（含 fbank 先验累计）
+            if (!enroll_samples(wd.samples.data(), wd.samples.size(), err, w,
+                                wd.samples.size() / 16000.0, now_str()))
+                return false;
             added++;
+        } catch (const std::exception& e) {
+            err = e.what();
+            return false;
         }
-        if (added == 0) { err = "no wav"; return false; }
-    } catch (const std::exception& e) {
-        err = e.what();
-        return false;
     }
+    if (added == 0) { err = "no wav"; return false; }
     return true;
 }
 
@@ -64,6 +66,16 @@ bool DemoCore::enroll_samples(const float* pcm, size_t n, std::string& err,
         auto emb = spk_->embed(pcm, (int)n);
         append_segment(emb, wav, duration_s > 0 ? duration_s : n / 16000.0,
                        time.empty() ? now_str() : time);
+        // 累计注册音频 fbank（流式 CMVN 先验用；与 CAM++ 同参数，不影响 embedding）
+        Fbank fbank;
+        std::vector<float> feats;
+        int T = fbank.compute(pcm, (int)n, feats);
+        if (T > 0) {
+            if (fbank_sum_.empty()) fbank_sum_.assign(80, 0.0);
+            for (int t = 0; t < T; t++)
+                for (int b = 0; b < 80; b++) fbank_sum_[b] += feats[(size_t)t * 80 + b];
+            fbank_frames_ += T;
+        }
     } catch (const std::exception& e) {
         err = e.what();
         return false;
@@ -71,9 +83,18 @@ bool DemoCore::enroll_samples(const float* pcm, size_t n, std::string& err,
     return true;
 }
 
+std::vector<float> DemoCore::fbank_mean() const {
+    if (fbank_frames_ == 0) return {};
+    std::vector<float> m(80);
+    for (int b = 0; b < 80; b++) m[b] = (float)(fbank_sum_[b] / fbank_frames_);
+    return m;
+}
+
 void DemoCore::clear_enroll() {
     emb_sum_.clear();
     segs_.clear();
+    fbank_sum_.clear();
+    fbank_frames_ = 0;
     centroid_.clear();
     n_emb_ = 0;
     has_tpl_ = false;

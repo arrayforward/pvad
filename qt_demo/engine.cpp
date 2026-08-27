@@ -58,18 +58,33 @@ void Engine::init() {
     // 启动自动加载持久化注册（损坏则降级空注册，不崩溃）
     {
         std::vector<SegRecord> segs;
+        std::vector<float> fm;
         bool loaded = false;
         std::string le;
         QString dir = enrollmentDir();
-        if (EnrollStore::load(dir.toStdString(), segs, loaded, le)) {
+        if (EnrollStore::load(dir.toStdString(), segs, fm, loaded, le)) {
             if (loaded) {
                 core_.set_segments(segs);
+                if (!fm.empty()) {
+                    std::vector<double> s(80);
+                    for (int b = 0; b < 80; b++) s[b] = (double)fm[b] * 1000.0;
+                    core_.set_fbank_state(s, 1000);
+                }
                 emit enrollStatus(QString("已从磁盘加载（%1 段）").arg(core_.enroll_count()));
                 emit logLine(QString("已从 %1 加载注册（%2 段）").arg(dir).arg(core_.enroll_count()));
             }
         } else {
             emit logLine("注册文件损坏，已降级为空注册: " + QString::fromStdString(le));
         }
+    }
+    // 实时流式 PVAD（chunked GRU state 复用）
+    try {
+        stream_ = std::make_unique<PvadStream>(
+            (root + "/models/pvad/pvad_v4_stream.onnx").toStdString());
+        refreshStreamEnroll();
+        emit logLine("流式 PVAD 已加载 (pvad_v4_stream)");
+    } catch (const std::exception& e) {
+        emit logLine("流式 PVAD 加载失败（麦克风监听不可用）: " + QString::fromStdString(e.what()));
     }
     QString tts_dir = qEnvironmentVariable("TTS_MODEL_DIR", TTS_MODEL_DIR);
     if (tts_.init(tts_dir.toStdString(), e)) emit ttsStatus("TTS 就绪 (" + tts_dir + ")");
@@ -101,10 +116,23 @@ QString Engine::enrollmentDir() const {
 
 void Engine::persistEnrollment() {
     std::string e;
-    if (EnrollStore::save(enrollmentDir().toStdString(), core_.segments(), core_.centroid(), e))
+    if (EnrollStore::save(enrollmentDir().toStdString(), core_.segments(), core_.centroid(),
+                          core_.fbank_mean(), e)) {
         emit logLine(QString("注册已落盘（%1 段 -> enrollment/）").arg(core_.enroll_count()));
-    else
+        refreshStreamEnroll();
+    } else {
         emit logLine("注册保存失败: " + QString::fromStdString(e));
+    }
+}
+
+// 注册状态变化后同步流式 PVAD 的 emb 与 CMVN 先验
+void Engine::refreshStreamEnroll() {
+    if (!stream_) return;
+    if (core_.enrolled()) {
+        stream_->set_emb(core_.centroid().data());
+        auto m = core_.fbank_mean();
+        if (!m.empty()) stream_->set_cmvn_prior(m.data());
+    }
 }
 
 bool Engine::openPlayback(int sample_rate) {
@@ -187,14 +215,19 @@ bool Engine::openCapture() {
 void Engine::startListenMic() {
     if (recording_ || wizard_.active()) { emit logLine("录音/向导中，请先完成或停止"); return; }
     if (!core_.enrolled()) { emit logLine("请先注册 A"); return; }
+    if (!stream_) { emit logLine("流式 PVAD 未加载，无法监听"); return; }
     inject_mode_ = false;
     if (!openCapture()) return;
     core_.reset_stream();
+    stream_->reset();
+    sgate_.reset();
+    swin_.clear();
+    refreshStreamEnroll();
     interrupt_latched_ = false;
     if (ma_device_start(&cap_) != MA_SUCCESS) { emit logLine("采集启动失败"); return; }
     listening_ = true;
     emit listenChanged(true);
-    emit logLine("开始监听（麦克风）");
+    emit logLine("开始监听（麦克风，流式 PVAD）");
 }
 
 void Engine::startListenWav(QString path) {
@@ -428,15 +461,25 @@ void Engine::tick() {
         }
         stats_frames_++;
         stats_window_frames_++;
-        if (denoise_) {
-            float dn[160];
-            denoise_->process(frame, dn);
-            FrameEvent ev = core_.feed_frame(dn);
-            handleEvent(ev);
-        } else {
-            FrameEvent ev = core_.feed_frame(frame);
-            handleEvent(ev);
-        }
+        const float* src = frame;
+        float dn[160];
+        if (denoise_) { denoise_->process(frame, dn); src = dn; }
+        // 流式 PVAD：单帧 fbank（对齐 480 窗）+ chunk GRU 增量推理，每帧 O(1)
+        for (int i = 0; i < 160; i++) swin_.push_back(src[i]);
+        if (swin_.size() < 480) continue;
+        float w[400], f80[80];
+        std::copy(swin_.begin(), swin_.begin() + 400, w);
+        sfbank_.compute_one(w, f80);
+        swin_.erase(swin_.begin(), swin_.begin() + 160);
+        auto o = stream_->push_frame(f80);
+        if (!o.valid || !o.gated) continue;
+        bool fire = sgate_.update(o.p);
+        FrameEvent ev;
+        ev.p = o.p;
+        ev.consec = sgate_.consec();
+        ev.interrupt = fire;
+        ev.t = o.frame * 0.01;
+        handleEvent(ev);
     }
     // 处理率看门狗：监听中每 10s 报一次实际处理帧率（采集标称 100 帧/s）
     if (listening_ && stats_window_frames_ > 0) {

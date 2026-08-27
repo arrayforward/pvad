@@ -359,7 +359,7 @@ int run_persist_test(const std::string& root) {
         printf("[persist-test] enroll failed: %s\n", err.c_str());
         return 1;
     }
-    if (!EnrollStore::save(dir, core.segments(), core.centroid(), err)) {
+    if (!EnrollStore::save(dir, core.segments(), core.centroid(), core.fbank_mean(), err)) {
         printf("[persist-test] save failed: %s\n", err.c_str());
         return 1;
     }
@@ -367,8 +367,9 @@ int run_persist_test(const std::string& root) {
 
     // 2) 模拟新进程：新 DemoCore 加载 -> 逐位比对
     std::vector<SegRecord> segs;
+    std::vector<float> fm_, fm2_, fm3_;
     bool loaded = false;
-    if (!EnrollStore::load(dir, segs, loaded, err) || !loaded) {
+    if (!EnrollStore::load(dir, segs, fm_, loaded, err) || !loaded) {
         printf("[persist-test] load failed: %s\n", err.c_str());
         return 1;
     }
@@ -411,7 +412,7 @@ int run_persist_test(const std::string& root) {
         std::vector<SegRecord> s2;
         bool l2 = false;
         std::string e2;
-        bool ok = EnrollStore::load(dir2, s2, l2, e2);
+        bool ok = EnrollStore::load(dir2, s2, fm2_, l2, e2);
         DemoCore core3;
         core3.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err);
         core3.set_segments(s2);
@@ -434,7 +435,7 @@ int run_persist_test(const std::string& root) {
         std::vector<SegRecord> s3;
         bool l3 = false;
         std::string e3;
-        bool ok = EnrollStore::load(dir3, s3, l3, e3);
+        bool ok = EnrollStore::load(dir3, s3, fm3_, l3, e3);
         bool pass = !ok && !l3;  // 报错但不崩溃、loaded=false
         printf("PERSIST corrupt-file-degrade: ok=%d loaded=%d err=%.40s -> %s\n", (int)ok,
                (int)l3, e3.c_str(), pass ? "PASS" : "FAIL");

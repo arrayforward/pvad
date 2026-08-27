@@ -35,6 +35,8 @@ private:
     std::vector<float> backup_sum_;
     int backup_n_ = 0;
     std::vector<SegRecord> backup_segs_;  // 逐段明细也须备份，恢复才完整
+    std::vector<double> backup_fsum_;     // fbank 先验状态一并备份
+    size_t backup_fframes_ = 0;
     int step_ = 0;
     bool active_ = false;
 };

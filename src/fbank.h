@@ -18,6 +18,8 @@ public:
     explicit Fbank(const FbankOptions& opt = FbankOptions());
     // 计算 log-mel 特征，输出 out = num_frames * num_bins（行优先），返回帧数
     int compute(const float* pcm, int num_samples, std::vector<float>& out) const;
+    // 单帧版本：win400 为 400 采样（25ms）窗口，输出 80 维 log-mel（与 compute 单帧一致）
+    void compute_one(const float* win400, float* out80) const;
     int num_bins() const { return opt_.num_bins; }
 
 private:

@@ -22,6 +22,7 @@ add_library(pipe STATIC
     ${PROJ_ROOT}/src/fbank.cpp
     ${PROJ_ROOT}/src/speaker.cpp
     ${PROJ_ROOT}/src/pvad.cpp
+    ${PROJ_ROOT}/src/pvad_stream.cpp
     ${PROJ_ROOT}/src/denoise.cpp
 )
 target_include_directories(pipe PUBLIC ${PROJ_ROOT}/src ${ORT_DIR}/include)
