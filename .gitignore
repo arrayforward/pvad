@@ -13,3 +13,6 @@ third_party/sherpa-onnx/
 
 # qt_demo 录音产物
 qt_demo/recordings/
+
+# qt_demo 注册持久化（含个人声纹特征，用户数据）
+qt_demo/enrollment/

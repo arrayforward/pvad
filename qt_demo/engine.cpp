@@ -3,6 +3,7 @@
 #include "wav_io.h"
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 
 #define MINIAUDIO_IMPLEMENTATION
@@ -52,7 +53,23 @@ void Engine::init() {
         emit logLine("模型加载失败: " + QString::fromStdString(e));
         return;
     }
-    emit logLine("模型已加载 (campplus + pvad_v3)");
+    emit logLine("模型已加载 (campplus + pvad_v4)");
+    // 启动自动加载持久化注册（损坏则降级空注册，不崩溃）
+    {
+        std::vector<SegRecord> segs;
+        bool loaded = false;
+        std::string le;
+        QString dir = enrollmentDir();
+        if (EnrollStore::load(dir.toStdString(), segs, loaded, le)) {
+            if (loaded) {
+                core_.set_segments(segs);
+                emit enrollStatus(QString("已从磁盘加载（%1 段）").arg(core_.enroll_count()));
+                emit logLine(QString("已从 %1 加载注册（%2 段）").arg(dir).arg(core_.enroll_count()));
+            }
+        } else {
+            emit logLine("注册文件损坏，已降级为空注册: " + QString::fromStdString(le));
+        }
+    }
     QString tts_dir = qEnvironmentVariable("TTS_MODEL_DIR", TTS_MODEL_DIR);
     if (tts_.init(tts_dir.toStdString(), e)) emit ttsStatus("TTS 就绪 (" + tts_dir + ")");
     else emit ttsStatus("TTS 初始化失败: " + QString::fromStdString(e));
@@ -68,12 +85,25 @@ void Engine::enrollFiles(QStringList files) {
     for (auto& f : files) wavs.push_back(f.toStdString());
     std::string e;
     if (core_.enroll(wavs, e)) {
+        persistEnrollment();
         emit enrollStatus(QString("已注册 %1 段，质心就绪").arg(core_.enroll_count()));
         emit logLine(QString("注册成功: %1 个文件").arg(files.size()));
     } else {
         emit enrollStatus("注册失败");
         emit logLine("注册失败: " + QString::fromStdString(e));
     }
+}
+
+QString Engine::enrollmentDir() const {
+    return qEnvironmentVariable("DEMO_ROOT", DEMO_ROOT) + "/qt_demo/enrollment";
+}
+
+void Engine::persistEnrollment() {
+    std::string e;
+    if (EnrollStore::save(enrollmentDir().toStdString(), core_.segments(), core_.centroid(), e))
+        emit logLine(QString("注册已落盘（%1 段 -> enrollment/）").arg(core_.enroll_count()));
+    else
+        emit logLine("注册保存失败: " + QString::fromStdString(e));
 }
 
 bool Engine::openPlayback(int sample_rate) {
@@ -247,10 +277,14 @@ void Engine::finishRecord() {
     }
     // 向导态：段入向导状态机（取消向导时整体回滚，不会污染旧质心）
     if (wizard_.active()) {
-        if (wizard_.accept_segment(core_, recbuf_.data(), recbuf_.size())) {
+        QString rel = "recordings/" + QFileInfo(fname).fileName();
+        QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+        if (wizard_.accept_segment(core_, recbuf_.data(), recbuf_.size(),
+                                   rel.toStdString(), dur, ts.toStdString())) {
             int done_idx = wizard_.step() - 1;
             emit wizardSegmentAccepted(done_idx, dur);
             emit logLine(QString("第 %1/3 段已录入（%2s）").arg(done_idx + 1).arg(dur, 0, 'f', 1));
+            persistEnrollment();
             if (wizard_.step() >= WizardController::kTotal) {
                 emit wizardFinished(core_.enroll_count());
                 emit wizardStateChanged(false);
@@ -264,7 +298,11 @@ void Engine::finishRecord() {
         }
         return;
     }
-    if (core_.enroll_samples(recbuf_.data(), recbuf_.size(), e)) {
+    QString rel = "recordings/" + QFileInfo(fname).fileName();
+    QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+    if (core_.enroll_samples(recbuf_.data(), recbuf_.size(), e,
+                             rel.toStdString(), dur, ts.toStdString())) {
+        persistEnrollment();
         emit enrollStatus(QString("已注册 %1 段").arg(core_.enroll_count()));
         emit logLine(QString("录音 %1s 已加入注册（共 %2 段），已存 %3")
                          .arg(dur, 0, 'f', 1)
@@ -277,8 +315,12 @@ void Engine::finishRecord() {
 
 void Engine::clearEnroll() {
     core_.clear_enroll();
+    // 删除持久化文件（recordings/ 的 wav 保留）
+    QString dir = enrollmentDir();
+    QFile::remove(dir + "/tpl.bin");
+    QFile::remove(dir + "/segments.json");
     emit enrollStatus("未注册");
-    emit logLine("已清空注册集合");
+    emit logLine("已清空注册（enrollment/ 文件已删除，recordings/ 录音保留）");
 }
 
 void Engine::setDenoiseEnabled(bool on) {
@@ -314,6 +356,7 @@ void Engine::cancelWizard() {
     if (!wizard_.active()) return;
     if (recording_) { emit logLine("请先停止录音"); return; }
     wizard_.cancel(core_);
+    persistEnrollment();  // 恢复后的状态落盘（向导期间的段被回滚）
     emit wizardStateChanged(false);
     emit wizardCancelled();
     emit enrollStatus(core_.enrolled() ? QString("已注册 %1 段").arg(core_.enroll_count())

@@ -24,14 +24,17 @@ public:
     // 开始向导：备份当前注册状态并清空（开始全新注册）
     void start(DemoCore& core);
     // 录入一段：<2s 返回 false（重录本段）；成功则 enroll_samples 且 step_++，
-    // 最后一段完成后 active_ 自动变 false
-    bool accept_segment(DemoCore& core, const float* pcm, size_t n);
+    // 最后一段完成后 active_ 自动变 false。wav/time 为可选落盘元数据。
+    bool accept_segment(DemoCore& core, const float* pcm, size_t n,
+                        const std::string& wav = "", double duration_s = 0,
+                        const std::string& time = "");
     // 取消向导：恢复 start() 时备份的旧注册状态
     void cancel(DemoCore& core);
 
 private:
     std::vector<float> backup_sum_;
     int backup_n_ = 0;
+    std::vector<SegRecord> backup_segs_;  // 逐段明细也须备份，恢复才完整
     int step_ = 0;
     bool active_ = false;
 };

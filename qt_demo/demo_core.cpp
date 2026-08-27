@@ -4,6 +4,7 @@
 #include "pvad.h"
 #include "speaker.h"
 #include "wav_io.h"
+#include <ctime>
 
 DemoCore::DemoCore() = default;
 DemoCore::~DemoCore() = default;
@@ -19,6 +20,24 @@ bool DemoCore::init(const std::string& spk_model, const std::string& pvad_model,
     return true;
 }
 
+static std::string now_str() {
+    std::time_t t = std::time(nullptr);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+    return buf;
+}
+
+void DemoCore::append_segment(const std::vector<float>& emb, const std::string& wav,
+                              double duration_s, const std::string& time) {
+    if (emb_sum_.empty()) emb_sum_.assign(emb.size(), 0.f);
+    for (size_t i = 0; i < emb.size(); i++) emb_sum_[i] += emb[i];
+    segs_.push_back(SegRecord{wav, duration_s, time, emb});
+    n_emb_ += 1;
+    centroid_ = emb_sum_;
+    l2_normalize(centroid_);
+    has_tpl_ = true;
+}
+
 bool DemoCore::enroll(const std::vector<std::string>& wavs, std::string& err) {
     if (!spk_) { err = "core not initialized"; return false; }
     try {
@@ -26,15 +45,10 @@ bool DemoCore::enroll(const std::vector<std::string>& wavs, std::string& err) {
         for (auto& w : wavs) {
             WavData wd = read_wav(w);
             auto emb = spk_->embed(wd.samples.data(), (int)wd.samples.size());
-            if (emb_sum_.empty()) emb_sum_.assign(emb.size(), 0.f);
-            for (size_t i = 0; i < emb.size(); i++) emb_sum_[i] += emb[i];
+            append_segment(emb, w, wd.samples.size() / 16000.0, now_str());
             added++;
         }
         if (added == 0) { err = "no wav"; return false; }
-        n_emb_ += added;
-        centroid_ = emb_sum_;
-        l2_normalize(centroid_);
-        has_tpl_ = true;
     } catch (const std::exception& e) {
         err = e.what();
         return false;
@@ -42,16 +56,14 @@ bool DemoCore::enroll(const std::vector<std::string>& wavs, std::string& err) {
     return true;
 }
 
-bool DemoCore::enroll_samples(const float* pcm, size_t n, std::string& err) {
+bool DemoCore::enroll_samples(const float* pcm, size_t n, std::string& err,
+                              const std::string& wav, double duration_s,
+                              const std::string& time) {
     if (!spk_) { err = "core not initialized"; return false; }
     try {
         auto emb = spk_->embed(pcm, (int)n);
-        if (emb_sum_.empty()) emb_sum_.assign(emb.size(), 0.f);
-        for (size_t i = 0; i < emb.size(); i++) emb_sum_[i] += emb[i];
-        n_emb_ += 1;
-        centroid_ = emb_sum_;
-        l2_normalize(centroid_);
-        has_tpl_ = true;
+        append_segment(emb, wav, duration_s > 0 ? duration_s : n / 16000.0,
+                       time.empty() ? now_str() : time);
     } catch (const std::exception& e) {
         err = e.what();
         return false;
@@ -61,15 +73,37 @@ bool DemoCore::enroll_samples(const float* pcm, size_t n, std::string& err) {
 
 void DemoCore::clear_enroll() {
     emb_sum_.clear();
+    segs_.clear();
     centroid_.clear();
     n_emb_ = 0;
     has_tpl_ = false;
 }
 
-void DemoCore::set_enroll_state(const std::vector<float>& emb_sum, int n) {
+void DemoCore::set_enroll_state(const std::vector<float>& emb_sum, int n,
+                                const std::vector<SegRecord>& segs) {
     emb_sum_ = emb_sum;
     n_emb_ = n;
+    segs_ = segs;
     has_tpl_ = n > 0 && !emb_sum_.empty();
+    if (has_tpl_) {
+        centroid_ = emb_sum_;
+        l2_normalize(centroid_);
+    } else {
+        centroid_.clear();
+    }
+}
+
+void DemoCore::set_segments(const std::vector<SegRecord>& segs) {
+    segs_ = segs;
+    // 按原顺序重算累加和（浮点加法顺序一致 -> 与增量注册逐位一致）
+    emb_sum_.clear();
+    for (auto& s : segs_) {
+        if (s.emb.empty()) continue;
+        if (emb_sum_.empty()) emb_sum_.assign(s.emb.size(), 0.f);
+        for (size_t i = 0; i < s.emb.size(); i++) emb_sum_[i] += s.emb[i];
+    }
+    n_emb_ = (int)segs_.size();
+    has_tpl_ = n_emb_ > 0 && !emb_sum_.empty();
     if (has_tpl_) {
         centroid_ = emb_sum_;
         l2_normalize(centroid_);

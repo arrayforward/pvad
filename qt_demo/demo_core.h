@@ -19,6 +19,14 @@ struct FrameEvent {
     double t = 0.0;         // 虚拟时间戳（秒）
 };
 
+// 一段注册的明细（持久化到 enrollment/segments.json）
+struct SegRecord {
+    std::string wav;        // 来源 wav 路径（录音为 recordings/rec_*.wav）
+    double duration_s = 0;
+    std::string time;       // 录入时间 "yyyy-MM-dd HH:mm:ss"
+    std::vector<float> emb; // 该段 L2 归一化 embedding（192 维）
+};
+
 class DemoCore {
 public:
     DemoCore();
@@ -26,15 +34,24 @@ public:
     bool init(const std::string& spk_model, const std::string& pvad_model, std::string& err);
     // 对若干 16k 单声道 wav 做 enrollment（L2 归一化后累加进注册集合，质心 = 均值归一化）
     bool enroll(const std::vector<std::string>& wavs, std::string& err);
-    // 追加一段裸 16k 音频到注册集合（录音注册用）
-    bool enroll_samples(const float* pcm, size_t n, std::string& err);
+    // 追加一段裸 16k 音频到注册集合（录音注册用；可带来源元数据用于落盘）
+    bool enroll_samples(const float* pcm, size_t n, std::string& err,
+                        const std::string& wav = "", double duration_s = 0,
+                        const std::string& time = "");
     void clear_enroll();
     // 注册状态备份/恢复（引导注册"取消则恢复旧质心"语义用）
-    void get_enroll_state(std::vector<float>& emb_sum, int& n) const {
+    void get_enroll_state(std::vector<float>& emb_sum, int& n,
+                          std::vector<SegRecord>& segs) const {
         emb_sum = emb_sum_;
         n = n_emb_;
+        segs = segs_;
     }
-    void set_enroll_state(const std::vector<float>& emb_sum, int n);
+    void set_enroll_state(const std::vector<float>& emb_sum, int n,
+                          const std::vector<SegRecord>& segs);
+    // 从逐段记录精确重建（emb_sum 按序累加，与增量注册逐位一致）
+    void set_segments(const std::vector<SegRecord>& segs);
+    const std::vector<SegRecord>& segments() const { return segs_; }
+    const std::vector<float>& centroid() const { return centroid_; }
     bool enrolled() const { return has_tpl_; }
     int enroll_count() const { return n_emb_; }
 
@@ -48,10 +65,14 @@ public:
     double now() const { return frame_idx_ * 0.01; }
 
 private:
+    void append_segment(const std::vector<float>& emb, const std::string& wav,
+                        double duration_s, const std::string& time);
+
     std::unique_ptr<SpeakerEmbedder> spk_;
     std::unique_ptr<Pvad> pvad_;
     std::vector<float> centroid_;
     std::vector<float> emb_sum_;   // 注册集合：各段 embedding（L2 归一化）的累加
+    std::vector<SegRecord> segs_;  // 逐段明细（持久化用）
     int n_emb_ = 0;
     bool has_tpl_ = false;
     PvadGate gate_{0.5f, 0.2f, 2};

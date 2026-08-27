@@ -10,3 +10,6 @@ int run_record_test(const std::string& root, int seconds);
 
 // 引导注册状态机无头验证：完成 3 段 / 单段太短重录 / 中途取消恢复旧质心
 int run_wizard_test(const std::string& root);
+
+// 注册持久化无头验证：保存 -> 新实例加载 -> 质心/emb_sum 逐位一致 + CLI tpl 互操作
+int run_persist_test(const std::string& root);

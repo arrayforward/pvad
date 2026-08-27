@@ -55,6 +55,7 @@ add_executable(pvad_demo
     engine.h engine.cpp
     demo_core.h demo_core.cpp
     wizard.h wizard.cpp
+    enroll_store.h enroll_store.cpp
     tts.h tts.cpp
     autotest.h autotest.cpp
 )

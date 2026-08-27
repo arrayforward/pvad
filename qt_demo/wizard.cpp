@@ -11,17 +11,19 @@ const WizardStep WizardController::kSteps[WizardController::kTotal] = {
 };
 
 void WizardController::start(DemoCore& core) {
-    core.get_enroll_state(backup_sum_, backup_n_);
+    core.get_enroll_state(backup_sum_, backup_n_, backup_segs_);
     core.clear_enroll();
     step_ = 0;
     active_ = true;
 }
 
-bool WizardController::accept_segment(DemoCore& core, const float* pcm, size_t n) {
+bool WizardController::accept_segment(DemoCore& core, const float* pcm, size_t n,
+                                      const std::string& wav, double duration_s,
+                                      const std::string& time) {
     if (!active_ || step_ >= kTotal) return false;
     if (n < kMinSamples) return false;  // 太短，重录本段
     std::string err;
-    if (!core.enroll_samples(pcm, n, err)) return false;
+    if (!core.enroll_samples(pcm, n, err, wav, duration_s, time)) return false;
     step_++;
     if (step_ >= kTotal) active_ = false;
     return true;
@@ -29,7 +31,7 @@ bool WizardController::accept_segment(DemoCore& core, const float* pcm, size_t n
 
 void WizardController::cancel(DemoCore& core) {
     if (!active_) return;
-    core.set_enroll_state(backup_sum_, backup_n_);
+    core.set_enroll_state(backup_sum_, backup_n_, backup_segs_);
     step_ = 0;
     active_ = false;
 }

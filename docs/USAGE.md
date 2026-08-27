@@ -187,9 +187,22 @@ windeployqt 自动拷贝；sherpa/onnxruntime DLL 一并拷贝（onnxruntime.dll
     过程中显示已录时长；停止后立即过 CAM++ 提 embedding **追加**进注册集合
     （与 WAV 注册同一质心平均逻辑），每段录音同时保存到 `qt_demo/recordings/`
     （16k mono，文件名带时间戳）便于复用排查。<2s 的录音会被拒（提示"建议3-10秒"）
-  - `清空注册`：清空注册集合
+  - `清空注册`：清空注册集合，同时删除 `enrollment/tpl.bin` 和 `enrollment/segments.json`
+    （`recordings/` 的录音 wav 保留）
   - 静态提示：建议每段 3-10 秒、录 3-5 段、变换与麦克风的距离/角度
   - 录音注册与监听互斥（监听中录音按钮置灰，反之亦然），避免采集流冲突
+
+**注册持久化**：注册状态（质心 + 每段 embedding）自动落盘到 `qt_demo/enrollment/`，
+下次启动自动加载（状态区显示「已从磁盘加载（N 段）」，无需重新注册）：
+
+- `enrollment/tpl.bin`：与 CLI 完全相同的模板格式（v3，仅正质心）——**双向兼容**：
+  qt_demo 注册的 tpl 可直接给 CLI 用（`double_voice --template`、`score`），CLI `enroll`
+  生成的 tpl.bin 放到该目录 qt_demo 启动也能导入（按单段恢复，可继续增量注册）
+- `enrollment/segments.json`：每段明细 `{"wav","duration_s","time","embedding":[192 floats]}`
+  （`%.9g` 精度，float32 无损往返）。加载时按原顺序重算累加和，与重启前**逐位一致**
+- 落盘时机：WAV 注册/录音注册/向导每段录入/向导取消/清空后自动全量重写
+- 加载失败（文件损坏）降级为空注册并在日志提示，不崩溃
+- 该目录含个人声纹特征，属用户数据，已 gitignore（与 `recordings/` 一致）
 - **TTS 区**：文本框 + `朗读`：合成（Engine 线程，不卡 UI）→ miniaudio 播放；无播放设备时
   自动降级为虚拟播放（状态机一致，便于无头环境）
 - **监听区**：`开始监听`/`停止`；音源二选一：
@@ -209,6 +222,8 @@ windeployqt 自动拷贝；sherpa/onnxruntime DLL 一并拷贝（onnxruntime.dll
 - `--record-test [秒]`：录音注册代码路径无头冒烟（录音 → 存 wav → CAM++ 注册）
 - `--wizard-test`：引导注册状态机无头验证（单段太短重录 / 完成 3 段 /
   中途取消恢复旧质心 / 0 段取消边界，均不依赖真实麦克风）
+- `--persist-test`：注册持久化无头验证（保存 → 新实例加载 → 质心/emb_sum 逐位一致、
+  tpl.bin CLI 互操作、CLI tpl 导入、损坏文件降级，ALL PASS）
 
 ### 4.4 模型版本切换
 

@@ -68,6 +68,8 @@ int main(int argc, char** argv) {
 
     if (args.contains("--wizard-test")) return run_wizard_test(DEMO_ROOT);
 
+    if (args.contains("--persist-test")) return run_persist_test(DEMO_ROOT);
+
     if (args.contains("--auto-test")) {
         std::string root = DEMO_ROOT;
         std::string tts_dir = TTS_MODEL_DIR;

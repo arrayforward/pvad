@@ -6,10 +6,14 @@
 #include "autotest.h"
 #include "demo_core.h"
 #include "denoise.h"
+#include "enroll_store.h"
+#include "speaker.h"
 #include "tts.h"
 #include "wav_io.h"
 #include "wizard.h"
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -259,7 +263,7 @@ int run_wizard_test(const std::string& root) {
     }
     std::vector<float> old_sum;
     int old_n = 0;
-    core.get_enroll_state(old_sum, old_n);
+    { std::vector<SegRecord> s_; core.get_enroll_state(old_sum, old_n, s_); }
 
     WavData wd = read_wav(root + "/test_audio/voice1b.wav");  // ~9.8s
     const float* pcm = wd.samples.data();
@@ -288,7 +292,7 @@ int run_wizard_test(const std::string& root) {
     {
         std::vector<float> pre_sum;
         int pre_n = 0;
-        core.get_enroll_state(pre_sum, pre_n);  // 当前为路径1/2 后的 3 段状态
+        { std::vector<SegRecord> s_; core.get_enroll_state(pre_sum, pre_n, s_); }  // 当前为路径1/2 后的 3 段状态
         WizardController w;
         w.start(core);
         if (!w.accept_segment(core, pcm, 16000 * 3)) {
@@ -298,7 +302,7 @@ int run_wizard_test(const std::string& root) {
             w.cancel(core);
             std::vector<float> post_sum;
             int post_n = 0;
-            core.get_enroll_state(post_sum, post_n);
+            { std::vector<SegRecord> s_; core.get_enroll_state(post_sum, post_n, s_); }
             bool pass = (post_n == pre_n) && (post_sum == pre_sum) && !w.active();
             printf("WIZARD path3 cancel-restore: n %d->%d sum_equal=%d -> %s\n",
                    pre_n, post_n, (int)(post_sum == pre_sum), pass ? "PASS" : "FAIL");
@@ -310,7 +314,7 @@ int run_wizard_test(const std::string& root) {
     {
         std::vector<float> pre_sum;
         int pre_n = 0;
-        core.get_enroll_state(pre_sum, pre_n);
+        { std::vector<SegRecord> s_; core.get_enroll_state(pre_sum, pre_n, s_); }
         WizardController w;
         w.start(core);  // 清空注册
         if (core.enrolled()) {
@@ -320,7 +324,7 @@ int run_wizard_test(const std::string& root) {
             w.cancel(core);
             std::vector<float> post_sum;
             int post_n = 0;
-            core.get_enroll_state(post_sum, post_n);
+            { std::vector<SegRecord> s_; core.get_enroll_state(post_sum, post_n, s_); }
             bool pass = (post_n == pre_n) && (post_sum == pre_sum);
             printf("WIZARD path4 cancel-at-step0: restored=%d -> %s\n", (int)pass,
                    pass ? "PASS" : "FAIL");
@@ -329,5 +333,113 @@ int run_wizard_test(const std::string& root) {
     }
 
     printf("[wizard-test] %s\n", fails == 0 ? "ALL PASS" : "HAS FAILURES");
+    return fails == 0 ? 0 : 1;
+}
+
+// ---------------- 注册持久化无头验证 ----------------
+
+int run_persist_test(const std::string& root) {
+    int fails = 0;
+    std::string err;
+    std::string dir = root + "/build/persist_test/enrollment";
+    std::filesystem::remove_all(root + "/build/persist_test");
+
+    // 1) 注册 2 段（带元数据）-> 落盘
+    DemoCore core;
+    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err)) {
+        printf("[persist-test] core init failed: %s\n", err.c_str());
+        return 1;
+    }
+    WavData wd = read_wav(root + "/test_audio/voice1b.wav");
+    if (!core.enroll_samples(wd.samples.data(), 16000 * 3, err,
+                             "recordings/rec_a.wav", 3.0, "2026-08-27 10:00:00") ||
+        !core.enroll_samples(wd.samples.data() + 16000 * 3, 16000 * 3, err,
+                             "recordings/rec_b.wav", 3.0, "2026-08-27 10:01:00")) {
+        printf("[persist-test] enroll failed: %s\n", err.c_str());
+        return 1;
+    }
+    if (!EnrollStore::save(dir, core.segments(), core.centroid(), err)) {
+        printf("[persist-test] save failed: %s\n", err.c_str());
+        return 1;
+    }
+    printf("[persist-test] saved %d segments -> %s\n", core.enroll_count(), dir.c_str());
+
+    // 2) 模拟新进程：新 DemoCore 加载 -> 逐位比对
+    std::vector<SegRecord> segs;
+    bool loaded = false;
+    if (!EnrollStore::load(dir, segs, loaded, err) || !loaded) {
+        printf("[persist-test] load failed: %s\n", err.c_str());
+        return 1;
+    }
+    DemoCore core2;
+    core2.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err);
+    core2.set_segments(segs);
+    double max_diff = 0;
+    for (size_t i = 0; i < core.centroid().size(); i++)
+        max_diff = std::max(max_diff, (double)std::fabs(core.centroid()[i] - core2.centroid()[i]));
+    {
+        std::vector<float> s1, s2;
+        int n1, n2;
+        std::vector<SegRecord> g1, g2;
+        core.get_enroll_state(s1, n1, g1);
+        core2.get_enroll_state(s2, n2, g2);
+        bool sum_equal = (n1 == n2) && (s1 == s2);
+        bool seg_equal = (g1.size() == g2.size());
+        printf("PERSIST reload-bitexact: centroid_max_diff=%.3g sum_equal=%d seg_count=%d -> %s\n",
+               max_diff, (int)sum_equal, (int)g2.size(),
+               (max_diff == 0 && sum_equal && seg_equal) ? "PASS" : "FAIL");
+        if (!(max_diff == 0 && sum_equal && seg_equal)) fails++;
+    }
+
+    // 3) CLI 互操作：qt_demo 存的 tpl.bin 用 CLI 模板加载，与质心余弦应为 1
+    {
+        Template tpl = load_template(dir + "/tpl.bin");
+        double dot = 0;
+        for (size_t i = 0; i < tpl.pos.size(); i++) dot += (double)tpl.pos[i] * core.centroid()[i];
+        bool pass = dot > 1.0 - 1e-6;
+        printf("PERSIST tpl-interop: cos(tpl.pos, centroid)=%.8f -> %s\n", dot,
+               pass ? "PASS" : "FAIL");
+        if (!pass) fails++;
+    }
+
+    // 4) CLI 导入路径：仅 tpl.bin（无 segments.json）-> 单段恢复且可继续增量注册
+    {
+        std::string dir2 = root + "/build/persist_test/enrollment_cli";
+        std::filesystem::create_directories(dir2);
+        save_template(dir2 + "/tpl.bin", Template{core.centroid(), {}, {}});
+        std::vector<SegRecord> s2;
+        bool l2 = false;
+        std::string e2;
+        bool ok = EnrollStore::load(dir2, s2, l2, e2);
+        DemoCore core3;
+        core3.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err);
+        core3.set_segments(s2);
+        double dot = 0;
+        for (size_t i = 0; i < core.centroid().size(); i++)
+            dot += (double)core3.centroid()[i] * core.centroid()[i];
+        bool pass = ok && l2 && s2.size() == 1 && dot > 1.0 - 1e-6;
+        printf("PERSIST cli-tpl-import: segments=%zu cos=%.8f -> %s\n", s2.size(), dot,
+               pass ? "PASS" : "FAIL");
+        if (!pass) fails++;
+    }
+
+    // 5) 损坏文件：不崩溃，降级空注册
+    {
+        std::string dir3 = root + "/build/persist_test/enrollment_bad";
+        std::filesystem::create_directories(dir3);
+        FILE* f = fopen((dir3 + "/segments.json").c_str(), "w");
+        fprintf(f, "{\"segments\":[{garbage!!!");
+        fclose(f);
+        std::vector<SegRecord> s3;
+        bool l3 = false;
+        std::string e3;
+        bool ok = EnrollStore::load(dir3, s3, l3, e3);
+        bool pass = !ok && !l3;  // 报错但不崩溃、loaded=false
+        printf("PERSIST corrupt-file-degrade: ok=%d loaded=%d err=%.40s -> %s\n", (int)ok,
+               (int)l3, e3.c_str(), pass ? "PASS" : "FAIL");
+        if (!pass) fails++;
+    }
+
+    printf("[persist-test] %s\n", fails == 0 ? "ALL PASS" : "HAS FAILURES");
     return fails == 0 ? 0 : 1;
 }

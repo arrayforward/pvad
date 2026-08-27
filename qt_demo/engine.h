@@ -11,6 +11,7 @@
 #include <vector>
 #include "demo_core.h"
 #include "denoise.h"
+#include "enroll_store.h"
 #include "tts.h"
 #include "wizard.h"
 #include <miniaudio.h>
@@ -64,6 +65,8 @@ private:
     void closeDevices();
     void handleEvent(const FrameEvent& ev);
     void finishRecord();
+    void persistEnrollment();       // 注册状态变化后落盘 enrollment/
+    QString enrollmentDir() const;  // <root>/qt_demo/enrollment
 
     DemoCore core_;
     Tts tts_;
