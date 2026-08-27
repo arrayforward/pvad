@@ -47,8 +47,10 @@ FeedResult feed(DemoCore& core, const std::vector<float>& pcm, float gain = 1.0f
     return r;
 }
 
-// 整段预降噪（与 CLI run_offline 一致：保证 PVAD 整段预计算作用在干净信号上）
-std::vector<float> pre_denoise(const std::vector<float>& pcm, Denoise& d) {
+// 整段预降噪（与 CLI run_offline 一致：每个文件一个全新 Denoise——重采样器/RNNoise
+// 是有状态的，跨文件复用会把上一文件的残态带进本文件特征，污染判定）
+std::vector<float> pre_denoise(const std::vector<float>& pcm, Denoise*) {
+    Denoise d;
     std::vector<float> out(pcm.size());
     size_t n = pcm.size() / 160;
     for (size_t i = 0; i < n; i++) d.process(&pcm[i * 160], &out[i * 160]);
@@ -73,7 +75,7 @@ int run_auto_test(const std::string& root, const std::string& tts_model_dir, boo
     printf("[auto-test] denoise=%s\n", denoise ? "rnnoise" : "off");
 
     DemoCore core;
-    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v3.onnx", err)) {
+    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err)) {
         printf("[auto-test] core init failed: %s\n", err.c_str());
         return 1;
     }
@@ -122,7 +124,7 @@ int run_auto_test(const std::string& root, const std::string& tts_model_dir, boo
         core.reset_stream();
         std::vector<float> gained(tts_pcm.size());
         for (size_t i = 0; i < tts_pcm.size(); i++) gained[i] = tts_pcm[i] * 0.6f;
-        if (denoise) gained = pre_denoise(gained, *denoise);  // 预降噪（与 CLI 离线一致）
+        if (use_denoise) gained = pre_denoise(gained, nullptr);
         if (!core.precompute_file(gained.data(), gained.size(), err)) {
             printf("[auto-test] precompute failed: %s\n", err.c_str());
             return 1;
@@ -139,7 +141,7 @@ int run_auto_test(const std::string& root, const std::string& tts_model_dir, boo
     for (const char* name : {"voice1b", "voice2"}) {
         core.reset_stream();
         WavData wd = read_wav(root + "/test_audio/" + name + ".wav");
-        std::vector<float> samples = denoise ? pre_denoise(wd.samples, *denoise)
+        std::vector<float> samples = use_denoise ? pre_denoise(wd.samples, nullptr)
                                              : std::move(wd.samples);
         if (!core.precompute_file(samples.data(), samples.size(), err)) {
             printf("[auto-test] precompute failed: %s\n", err.c_str());
@@ -228,7 +230,7 @@ int run_record_test(const std::string& root, int seconds) {
     // CAM++ 注册
     DemoCore core;
     std::string err;
-    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v3.onnx", err)) {
+    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err)) {
         printf("[record-test] core init failed: %s\n", err.c_str());
         return 1;
     }
@@ -246,7 +248,7 @@ int run_wizard_test(const std::string& root) {
     int fails = 0;
     std::string err;
     DemoCore core;
-    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v3.onnx", err)) {
+    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err)) {
         printf("[wizard-test] core init failed: %s\n", err.c_str());
         return 1;
     }

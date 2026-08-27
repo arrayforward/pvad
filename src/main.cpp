@@ -30,7 +30,7 @@ struct Args {
     std::string batch_list, batch_out;   // 批量模式：--batch-list 文件列表 -> --batch-out 结果
     std::string vad_model = "models/silero_vad.onnx";
     std::string spk_model = "models/campplus.onnx";
-    std::string pvad_model = "models/pvad/pvad.onnx";
+    std::string pvad_model = "models/pvad/pvad_v4.onnx";
     std::string gate_mode = "pvad";   // pvad (默认) | asnorm
     std::string denoise = "rnnoise";  // rnnoise (默认) | off
     bool bench_denoise = false;
@@ -55,7 +55,7 @@ options:
   --gate pvad         门控模式: pvad (默认, Personal VAD) | asnorm (AS-norm+margin)
   --pvad-threshold 0.5  pvad 模式: P(target) 触发阈值
   --pvad-hyst 0.2     pvad 模式: 低于 threshold-hyst 计数清零
-  --pvad-model PATH   pvad.onnx 路径
+  --pvad-model PATH   pvad.onnx 路径（默认 pvad_v4.onnx）
   --denoise rnnoise   降噪: rnnoise (默认, RNNoise) | off (回滚/对比用)
   --bench-denoise     测降噪单帧耗时后退出
   --threshold 0.55    asnorm no-norm 模式: sA_raw 触发阈值

@@ -42,7 +42,8 @@ tar xjf /tmp/sherpa.tar.bz2 && mv sherpa-onnx-v1.13.6-win-x64-shared-MD-Release 
 | `models/silero_vad.onnx` | 2.3MB | Silero VAD v5（asnorm 门控的语音检测） |
 | `models/pvad/pvad.onnx(+ .data)` | ~1MB | PVAD v1（emb 拼接条件） |
 | `models/pvad/pvad_v2.onnx(+ .data)` | ~1MB | PVAD v2（同 v1 架构，增广数据） |
-| `models/pvad/pvad_v3.onnx(+ .data)` | ~1MB | PVAD v3（FiLM 条件，**默认**） |
+| `models/pvad/pvad_v3.onnx(+ .data)` | ~1MB | PVAD v3（FiLM 条件） |
+| `models/pvad/pvad_v4.onnx(+ .data)` | ~1MB | PVAD v4（FiLM 条件，**默认**：双条件双优，C++ 干净回归 97.5%） |
 | `models/pvad/best*.pt` | 各 ~1MB | 训练 checkpoint（fine-tune 入口，TRAINING.md 复现用） |
 
 `.onnx.data` 是外部权重文件，必须与同名 `.onnx` 放在同一目录，不要单独移动/改名。
@@ -101,7 +102,7 @@ pvad 门控只用正质心；`--neg`/`--cohort` 仅供 asnorm 门控。
 | `--mic` | — | 实时模式（miniaudio 采集 16k 单声道） |
 | `--template PATH` | `tpl.bin` | enroll 产物 |
 | `--gate pvad\|asnorm` | `pvad` | 门控模式。pvad 双讲场景远优于 asnorm |
-| `--pvad-model PATH` | `models/pvad/pvad.onnx` | PVAD 模型（CLI 默认 v1；换 v3 见 4.1） |
+| `--pvad-model PATH` | `models/pvad/pvad_v4.onnx` | PVAD 模型（默认 v4；版本切换见 4.4） |
 | `--pvad-threshold` | 0.5 | P(target) 触发阈值。降 FAR 可试 0.6 |
 | `--pvad-hyst` | 0.2 | 低于 threshold−hyst 计数清零 |
 | `--confirm` | 2 | 连续 N 次满足才触发。降误打断可试 3–5 |
@@ -127,7 +128,7 @@ pvad 门控只用正质心；`--neg`/`--cohort` 仅供 asnorm 门控。
 ### 2.4 probe — 打印 ONNX 模型输入输出
 
 ```bash
-./build/probe.exe models/pvad/pvad_v3.onnx
+./build/probe.exe models/pvad/pvad_v4.onnx
 ```
 
 ---
@@ -143,11 +144,11 @@ pvad 门控只用正质心；`--neg`/`--cohort` 仅供 asnorm 门控。
 ./build/score.exe tpl.bin other.wav
 
 # 3) 离线验证（双讲样本/真人录音）
-./build/double_voice.exe --wav test.wav --template tpl.bin --pvad-model models/pvad/pvad_v3.onnx
+./build/double_voice.exe --wav test.wav --template tpl.bin --pvad-model models/pvad/pvad_v4.onnx
 # 观察每帧 p_target、>>> INTERRUPT <<< 及时间戳
 
 # 4) 实时运行
-./build/double_voice.exe --mic --template tpl.bin --pvad-model models/pvad/pvad_v3.onnx --seconds 60
+./build/double_voice.exe --mic --template tpl.bin --pvad-model models/pvad/pvad_v4.onnx --seconds 60
 
 # 5) 批量评估（需训练数据环境，见 TRAINING.md）
 python scripts/eval_cpp_pvad.py --max-n 50     # C++ 管线端到端对照
@@ -211,9 +212,13 @@ windeployqt 自动拷贝；sherpa/onnxruntime DLL 一并拷贝（onnxruntime.dll
 
 ### 4.4 模型版本切换
 
-- CLI：`--pvad-model models/pvad/pvad_v3.onnx`（三版接口相同：`feats[B,T,80]+emb[B,192]→logits[B,T,3]`）
-- qt_demo：默认编译期写死 `models/pvad/pvad_v3.onnx`（`engine.cpp` 的 `init()`），改路径重编译即可
-- 版本选择建议见 [TRAINING.md](../TRAINING.md) 第 5 节：干净近场用 v3，强噪声/混响可试 v2
+- CLI：`--pvad-model models/pvad/pvad_v4.onnx`（各版接口相同：`feats[B,T,80]+emb[B,192]→logits[B,T,3]`；
+  **默认已是 v4**，此参数仅用于切旧版对比）
+- qt_demo：默认编译期写死 `models/pvad/pvad_v4.onnx`（`engine.cpp` 的 `init()`），改路径重编译即可
+- **当前默认 v4 的理由**：python 口径干净 94.0%/增广 83.0% 双优（v3 为 92.4%/78.2%），
+  C++ 口径干净回归 97.5%（v3 为 95.5%，误打断 4.0%→1.5%）
+- 历史版本选择参考 [TRAINING.md](../TRAINING.md) 第 5 节（v2 在强噪声/混响下曾是首选，
+  v4 增广 83.0% 已超过 v2 的 81.8%）
 
 ---
 

@@ -17,8 +17,9 @@ TTS 时**只有已注册用户 A 的语音可以打断播放**——TTS 自身�
   真实人声混合物开/关无差异（A/B 数据见 [docs/DESIGN.md](docs/DESIGN.md) 第 7 节）
 - **AS-norm 门控基线**：CAM++ embedding + cohort t-norm 归一化 + 负模板 margin 判决，
   完整保留用于对照实验（`--gate asnorm`）
-- **三种模型版本**：pvad.onnx (v1) / pvad_v2.onnx (增广) / pvad_v3.onnx (FiLM，默认)，
-  接口相同可直接替换
+- **四种模型版本**：pvad.onnx (v1) / pvad_v2.onnx (增广) / pvad_v3.onnx (FiLM) /
+  pvad_v4.onnx (FiLM，**当前默认**——python 口径干净 94.0%/增广 83.0% 双优，
+  C++ 回归干净 97.5%），接口相同可直接替换
 - **工具链**：enroll（注册）、score（打分）、double_voice（离线/实时管线）、
   pvad_demo（Qt6 图形 demo，含 `--auto-test` 无头验证）
 
@@ -45,7 +46,7 @@ C++ 管线与 python 评估逐帧等价（50 条双讲样本 C++ 正确率 88.0%
  麦克风 ─► 10ms 帧流 ─► fbank 80 维 ─► 均值归一化 ─► feats [B,T,80]
                                                  │
                                                  ▼
-                              PVAD (pvad_v3.onnx, GRU+FiLM)
+                              PVAD (pvad_v4.onnx, GRU+FiLM)
                                                  │ logits [B,T,3] → softmax → P(target)
                                                  ▼
                           门控（连续 2 帧 >0.5，迟滞清零）──► INTERRUPT ─► 停止 TTS 播放

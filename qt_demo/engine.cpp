@@ -47,7 +47,7 @@ void Engine::init() {
     QString err;
     std::string e;
     models_ok_ = core_.init((root + "/models/campplus.onnx").toStdString(),
-                            (root + "/models/pvad/pvad_v3.onnx").toStdString(), e);
+                            (root + "/models/pvad/pvad_v4.onnx").toStdString(), e);
     if (!models_ok_) {
         emit logLine("模型加载失败: " + QString::fromStdString(e));
         return;
