@@ -9,6 +9,7 @@
 #include "enroll_store.h"
 #include "speaker.h"
 #include "tts.h"
+#include "ui_state.h"
 #include "wav_io.h"
 #include "wizard.h"
 #include <algorithm>
@@ -441,5 +442,74 @@ int run_persist_test(const std::string& root) {
     }
 
     printf("[persist-test] %s\n", fails == 0 ? "ALL PASS" : "HAS FAILURES");
+    return fails == 0 ? 0 : 1;
+}
+
+// ---------------- UI 状态机 / 背压决策无头验证 ----------------
+
+int run_ui_state_test() {
+    int fails = 0;
+    auto check = [&](const char* name, bool cond) {
+        printf("UI-STATE %-44s %s\n", name, cond ? "PASS" : "FAIL");
+        if (!cond) fails++;
+    };
+
+    // 1) idle 初始：全部可用（停止监听除外）
+    {
+        UiState ui;
+        check("idle: speak/listen/enroll/wizard enabled",
+              ui.canSpeak() && ui.canStartListen() && ui.canEnroll() &&
+              ui.canStartWizard() && ui.canRecord() && !ui.canStopListen());
+    }
+    // 2) 监听中：停止可用、朗读可用、监听/注册/向导禁用
+    {
+        UiState ui;
+        ui.onListenChanged(true);
+        check("listening: stop enabled, speak enabled",
+              ui.canStopListen() && ui.canSpeak());
+        check("listening: listen/enroll/wizard/record disabled",
+              !ui.canStartListen() && !ui.canEnroll() && !ui.canStartWizard() &&
+              !ui.canRecord());
+        // 3) 监听中点停止 -> 回 idle -> 全部恢复
+        ui.onListenChanged(false);
+        check("stop-listen -> idle: speak/listen enabled again",
+              ui.canSpeak() && ui.canStartListen() && ui.canEnroll() &&
+              ui.canStartWizard() && !ui.canStopListen());
+    }
+    // 4) 录音中：监听禁用、朗读可用；录音结束恢复
+    {
+        UiState ui;
+        ui.onRecordChanged(true);
+        check("recording: listen disabled, speak enabled",
+              !ui.canStartListen() && ui.canSpeak());
+        ui.onRecordChanged(false);
+        check("record done -> idle restored", !ui.busy() && ui.canStartListen());
+    }
+    // 5) 向导中：朗读禁用（关键互斥）；取消向导恢复
+    {
+        UiState ui;
+        ui.onWizardChanged(true);
+        check("wizard: speak DISABLED", !ui.canSpeak());
+        check("wizard: listen/enroll/record disabled",
+              !ui.canStartListen() && !ui.canEnroll() && !ui.canRecord());
+        ui.onWizardChanged(false);
+        check("wizard cancel -> speak enabled again", ui.canSpeak() && !ui.busy());
+    }
+    // 6) 背压语义：积压 <=1s 不丢；>1s 丢弃到保留最新 0.5s；有界单调
+    {
+        check("backpressure: no drop below threshold",
+              Backpressure::drop_count(16000) == 0 &&
+              Backpressure::drop_count(0) == 0 &&
+              Backpressure::drop_count(15999) == 0);
+        size_t d = Backpressure::drop_count(16000 * 5);
+        check("backpressure: 5s backlog -> keep newest 0.5s",
+              d == 16000 * 5 - Backpressure::kKeepSamples &&
+              (16000 * 5 - d) == Backpressure::kKeepSamples);
+        check("backpressure: monotonic + bounded",
+              Backpressure::drop_count(16000 * 3) <= Backpressure::drop_count(16000 * 5) &&
+              Backpressure::kMaxPerTick > 0 && Backpressure::kMaxPerTick <= 20);
+    }
+
+    printf("[ui-state-test] %s\n", fails == 0 ? "ALL PASS" : "HAS FAILURES");
     return fails == 0 ? 0 : 1;
 }

@@ -1,6 +1,7 @@
 // mainwindow.cpp
 #include "mainwindow.h"
 #include "engine.h"
+#include "ui_state.h"
 #include "wizard.h"
 #include <QDateTime>
 #include <QFileDialog>
@@ -141,7 +142,7 @@ MainWindow::MainWindow() {
                                                         Qt::QueuedConnection, Q_ARG(QStringList, files));
     });
     connect(rec_btn_, &QPushButton::clicked, this, [this]() {
-        if (recording_)
+        if (ui_.recording)
             QMetaObject::invokeMethod(engine_, "stopRecord", Qt::QueuedConnection);
         else
             QMetaObject::invokeMethod(engine_, "startRecord", Qt::QueuedConnection);
@@ -153,7 +154,7 @@ MainWindow::MainWindow() {
         QMetaObject::invokeMethod(engine_, "startWizard", Qt::QueuedConnection);
     });
     connect(wiz_rec_btn_, &QPushButton::clicked, this, [this]() {
-        if (recording_)
+        if (ui_.recording)
             QMetaObject::invokeMethod(engine_, "stopRecord", Qt::QueuedConnection);
         else
             QMetaObject::invokeMethod(engine_, "startRecord", Qt::QueuedConnection);
@@ -200,18 +201,18 @@ MainWindow::MainWindow() {
         tts_label_->setText(playing ? "播放中" : "空闲");
     });
     connect(engine_, &Engine::listenChanged, this, [this](bool on) {
-        listening_ = on;
+        ui_.onListenChanged(on);
         updateButtons();
     });
     connect(engine_, &Engine::recordStateChanged, this, [this](bool on) {
-        recording_ = on;
+        ui_.onRecordChanged(on);
         if (!on) { rec_state_label_->clear(); rec_sec_ = 0.0; }
         updateButtons();
     });
     connect(engine_, &Engine::recordProgress, this, [this](double sec) {
         rec_sec_ = sec;
         rec_state_label_->setText(QString("录音中 %1s / 15s").arg(sec, 0, 'f', 1));
-        if (wizard_mode_ && recording_) {
+        if (ui_.wizard && ui_.recording) {
             wiz_sec_label_->setText(QString("录音中 %1s").arg(sec, 0, 'f', 1));
             // ≥3s 才允许手动停止
             wiz_rec_btn_->setEnabled(sec >= 3.0);
@@ -219,7 +220,7 @@ MainWindow::MainWindow() {
     });
     // ---- 引导注册 ----
     connect(engine_, &Engine::wizardStateChanged, this, [this](bool on) {
-        wizard_mode_ = on;
+        ui_.onWizardChanged(on);
         wizard_box_->setVisible(on);
         if (!on) {
             for (int i = 0; i < 3; i++) {
@@ -255,23 +256,22 @@ void MainWindow::updateWizardStep(int step) {
 }
 
 void MainWindow::updateButtons() {
-    bool busy = listening_ || recording_ || wizard_mode_;
-    listen_btn_->setEnabled(!busy);
-    stop_btn_->setEnabled(listening_);
-    rec_btn_->setEnabled(!listening_ && !wizard_mode_);
-    rec_btn_->setText(recording_ && !wizard_mode_ ? "停止录音" : "录音注册");
-    enroll_btn_->setEnabled(!busy);
-    clear_btn_->setEnabled(!busy);
-    wizard_btn_->setEnabled(!busy);
-    wav_pick_btn_->setEnabled(!busy);
-    speak_btn_->setEnabled(!wizard_mode_);
-    mic_radio_->setEnabled(!busy);
-    wav_radio_->setEnabled(!busy);
+    listen_btn_->setEnabled(ui_.canStartListen());
+    stop_btn_->setEnabled(ui_.canStopListen());
+    rec_btn_->setEnabled(ui_.canRecord());
+    rec_btn_->setText(ui_.recording && !ui_.wizard ? "停止录音" : "录音注册");
+    enroll_btn_->setEnabled(ui_.canEnroll());
+    clear_btn_->setEnabled(ui_.canEnroll());
+    wizard_btn_->setEnabled(ui_.canStartWizard());
+    wav_pick_btn_->setEnabled(ui_.canPickWav());
+    speak_btn_->setEnabled(ui_.canSpeak());
+    mic_radio_->setEnabled(!ui_.busy());
+    wav_radio_->setEnabled(!ui_.busy());
     // 向导面板内：录音按钮在录音中需 ≥3s 才能点（由 recordProgress 控制），非录音时常开
-    if (wizard_mode_) {
-        wiz_rec_btn_->setText(recording_ ? "停止录音" : "开始录音");
-        wiz_rec_btn_->setEnabled(!recording_ || rec_sec_ >= 3.0);
-        wiz_cancel_btn_->setEnabled(!recording_);
+    if (ui_.wizard) {
+        wiz_rec_btn_->setText(ui_.recording ? "停止录音" : "开始录音");
+        wiz_rec_btn_->setEnabled(!ui_.recording || rec_sec_ >= 3.0);
+        wiz_cancel_btn_->setEnabled(!ui_.recording);
     }
 }
 

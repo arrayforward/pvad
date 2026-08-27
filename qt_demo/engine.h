@@ -99,4 +99,12 @@ private:
 
     QTimer* timer_ = nullptr;
     bool interrupt_latched_ = false;      // 本次监听是否已触发过（日志只记首次，之后仍上报数值）
+    // 背压/节流状态
+    size_t drop_acc_ = 0;                 // 自上次日志以来丢弃的采样数
+    qint64 last_drop_log_ms_ = 0;
+    double last_prog_sec_ = -1.0;         // recordProgress 上次上报值（0.1s 节流）
+    qint64 listen_start_ms_ = 0;
+    qint64 stats_frames_ = 0;             // 本次监听已处理帧数
+    qint64 stats_window_start_ms_ = 0;    // 处理率统计窗口起点
+    qint64 stats_window_frames_ = 0;
 };

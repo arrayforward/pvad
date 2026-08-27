@@ -10,6 +10,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QThread>
+#include "ui_state.h"
 
 class Engine;
 
@@ -56,8 +57,6 @@ private:
     QLabel* gate_label_;
     QPlainTextEdit* log_edit_;
     QString inject_wav_;
-    bool listening_ = false;
-    bool recording_ = false;
-    bool wizard_mode_ = false;
+    UiState ui_;
     double rec_sec_ = 0.0;
 };

@@ -13,3 +13,6 @@ int run_wizard_test(const std::string& root);
 
 // 注册持久化无头验证：保存 -> 新实例加载 -> 质心/emb_sum 逐位一致 + CLI tpl 互操作
 int run_persist_test(const std::string& root);
+
+// UI 状态机/背压决策无头验证（UiState 转移 + Backpressure 丢帧语义）
+int run_ui_state_test();
