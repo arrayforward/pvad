@@ -3,8 +3,37 @@
 本文档覆盖 PVAD 模型的环境重建、数据管线、训练、评估与复现全流程。
 C++ 侧集成见 [README.md](README.md)；生产模型约定见 `models/pvad/pvad*.md`。
 
-当前模型版本：**v3（FiLM 条件，`models/pvad/pvad_v3.onnx`）为最新训练产物；
-C++ 管线默认加载 `pvad.onnx`（v1）**，替换前请阅读下文「模型选择指南」。
+## 0. 训练方案总览
+
+**数据**：1139 说话人 / 388h（AISHELL-1 400人 + ST-CMDS 443人 + Primewords 296人，
+说话人不重叠划分 train 950 / val 100 / test 89）；双讲混合物合成（目标+干扰
+SNR∈[-5,10]dB，10ms 帧级三分类标签由拼接位置精确生成）；v2 起 RIR+MUSAN 增广。
+
+**模型演进一图流**：
+
+```
+v1 broadcast 拼接条件 ─► v2 RIR/MUSAN 增广 ─► v3 FiLM 条件 + 双干扰硬负例
+  ─► v4 易混淆硬负例（top5 近邻 2000 条，FAR 0.276→0.210）
+  ─► v5 多帧 tokens + 交叉注意力（390K，增广历代最佳 89.4%）【离线生产】
+  ─► v4_stream GRU state 外置 + EMA-CMVN 微调（流式 94.5/82.5）【实时生产】
+  ─► v5s cos 注意力归一化（消除漂移敏感 87.0% vs 71.0%；流式 92.0/85.0）【干净可选】
+  ─► v6 per-frame CMVN（流式≡离线 0.0pp 但增广 77.5%）【方向终止】
+```
+
+**关键教训三条**：
+
+1. **target-absent 负样本是必要条件**：没有它模型学成"语音即目标"（FAR≈0.99），
+   完全忽略 enrollment；
+2. **帧级指标 ≠ 门控表现**（三次实证，见 3.5/选模节）：val F1/FAR 选模两度错过
+   e2e 更优 checkpoint，最终按 val e2e 选模；
+3. **跨帧统计本身承载判别线索**（v6 的反证）：per-frame CMVN 让"训练分布=部署分布"
+   严格成立（流式≡离线 0.0pp），但抹掉段级能量动态后增广大跌——EMA-CMVN 微调这种
+   "近似但保留统计"才是最优折中。
+
+**当前生产权重**（复现命令见各版本章节）：离线/批量 `models/pvad/pvad_v5.onnx`
+（best_v5fa.pt，自 best_v4 初始化 10 epoch，val e2e 选 ep08）；实时
+`models/pvad/pvad_v4_stream.onnx`（best_v4s.pt，EMA-CMVN 微调 4 epoch lr 1e-4）；
+可选 `models/pvad/pvad_v5s_stream.onnx`（best_v5s.pt，cos 注意力+EMA 微调）。
 
 ---
 

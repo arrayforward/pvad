@@ -1,8 +1,11 @@
 # 设计文档（DESIGN）
 
 本文档记录 pvad-barge-in 系统的问题定义、设计决策史（含被否决方案及理由）、PVAD 模型
-设计、门控状态机、C++ 工程架构与全部实测数据。使用说明见 [USAGE.md](USAGE.md)，
-训练全流程见 [TRAINING.md](../TRAINING.md)。
+设计、门控状态机与全部实测数据。
+
+**文档导航**：[ARCHITECTURE.md](ARCHITECTURE.md)（工程架构：模块契约/线程模型/部署矩阵/
+构建体系）、[USAGE.md](USAGE.md)（操作手册）、[TRAINING.md](../TRAINING.md)（训练方案与
+复现）、[REGRESSION.md](REGRESSION.md)（C++ 回归数据）、README.md（门面/快速开始）。
 
 ---
 
@@ -228,39 +231,18 @@ fbank + 整段均值归一化 + 单次 GRU 前向，与训练/python 评估完�
 
 ---
 
-## 5. C++ 工程架构
+## 5. 工程架构（指针）
 
-### 5.1 模块划分
+工程架构已独立成文：模块清单与接口签名、PVAD 接口代际表、tpl/segments.json 格式、
+线程模型与背压机制、部署矩阵与模型清单、双工具链构建体系——**见
+[ARCHITECTURE.md](ARCHITECTURE.md)**。设计侧只保留两条工程教训的记录：
 
-```
-src/  fbank（自实现 80 维 log-mel，radix-2 FFT）  vad（Silero v5，asnorm 用）
-      speaker（CAM++ embedding + 模板 v3 存取 + t-norm）  pvad（PVAD ONNX 封装）
-      gate（PvadGate 迟滞 / AS-norm Gate）  aec（SpeexDSP，可选）  wav_io
-      main（double_voice：离线 --wav / 实时 --mic）
-tools/ enroll（模板 v3：正质心 + 负质心列表 + cohort 向量数组）  score  probe
-qt_demo/ demo_core（Qt 无关管线核心）  engine（QThread worker）  mainwindow  tts  autotest
-scripts/ PVAD 数据/训练/评估 python 管线（见 TRAINING.md）
-```
-
-### 5.2 线程模型（qt_demo）
-
-miniaudio 采集回调线程 → 互斥队列 → Engine 所在 QThread（QTimer 5ms 消费 + PVAD 推理）
-→ Qt 信号槽回 GUI；TTS 合成也在 Engine 线程（防卡 UI）；播放回调独立线程。
-CLI 为单线程管线（原型取舍）。
-
-### 5.3 ONNX Runtime 集成
-
-- MinGW 直接链接 MSVC 预编译 `onnxruntime.dll`（C API 按名导入，header-only C++ 包装）；
-  构建后 dll 拷贝到 exe 旁；
-- MSVC/qt_demo 链接 `.lib` 导入库；**sherpa-onnx 与主项目 onnxruntime.dll 同名**，
-  qt_demo 统一使用 sherpa 包自带的新版 dll（ORT C API 向后兼容），MinGW CLI 仍用 1.20.1；
-- pvad session 日志级别设为 ERROR（屏蔽导出示例维度 137 导致的 shape 校验警告）。
-
-### 5.4 已知 MSVC 差异点
-
-`unique_ptr<IncompleteType>` 成员要求显式声明/定义构造与析构（MSVC 在隐式 ctor
-实例化时拒绝不完整类型，MinGW 放行）；Windows 头文件的 `far` 宏与字段名冲突（改名
-`far_wav`）；源文件 UTF-8 需 `/utf-8`。
+- **事件循环饿死**（§4.2/4.4 的流式性能背景）：旧实时路径成本随流长增长导致
+  GUI 线程饿死，引出背压机制与最终的流式 GRU state 复用（0.029 ms/帧 vs 旧 8s 段
+  11.54 ms/帧）；
+- **MSVC 差异点**：`unique_ptr<IncompleteType>` 成员要求显式声明/定义构造与析构
+  （MSVC 在隐式 ctor 实例化时拒绝不完整类型，MinGW 放行）；Windows 头文件的 `far`
+  宏与字段名冲突（改名 `far_wav`）；源文件 UTF-8 需 `/utf-8`。
 
 ---
 

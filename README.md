@@ -139,10 +139,11 @@ TTS 使用本地 VITS 模型（默认路径 `D:/vit/tts/models/vits-piper-zh_CN-
 
 ## 文档导航
 
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 架构文档：系统总览（离线/实时双路径）、模块契约、接口代际、线程模型、部署矩阵、构建体系
+- [docs/DESIGN.md](docs/DESIGN.md) — 设计文档：问题定义、设计决策史（含被否决方案）、PVAD 模型设计、门控状态机、实测数据
 - [docs/USAGE.md](docs/USAGE.md) — 使用文档：环境准备、CLI 全参数详解、典型工作流、qt_demo 指南、常见问题
-- [docs/DESIGN.md](docs/DESIGN.md) — 设计文档：问题定义、设计决策史、PVAD 模型设计、门控状态机、工程架构、全部实测数据
+- [TRAINING.md](TRAINING.md) — 训练文档：训练方案总览、语料获取（1139 人/388h）、v1→v6 数据与模型演进、评估方法论、复现清单
 - [docs/REGRESSION.md](docs/REGRESSION.md) — C++ 生产管线端到端回归数据与测试方法
-- [TRAINING.md](TRAINING.md) — 训练文档：语料获取（1139 人/388h）、数据管线 v1→v4、训练配置、评估方法论、复现清单
 - `models/pvad/pvad*.md` — 各模型版本的接口约定与指标
 
 ## License
