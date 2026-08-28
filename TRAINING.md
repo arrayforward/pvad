@@ -423,3 +423,100 @@ v5 流式需更长 EMA 微调或注意力输入归一化改造（后续工作）
 `best_v5fa.pt`(=ep08)/`best_v5a.pt`(=ep10)/`best_v5s.pt` + 各 train_log、
 `scripts/`（CrossAttn、tokens 预计算、v5 流式 wrapper、eval_stream v5 支持）。
 v1-v4 产物未动。
+
+---
+
+## 12. v5 流式修复（2026-08-28）：注意力输入归一化
+
+### 根因回顾
+v5 注意力把帧特征与 enrollment tokens 投影到同一空间做点积匹配，
+EMA-CMVN 的统计漂移破坏投影空间对齐 → v5_stream 增广 e2e 崩到 71.0%
+（FiLM 不点积所以 v4_stream 免疫）。
+
+### 方案 1：逐帧 LayerNorm 双路（失败，已弃）
+注意力 query 路径吃 LN(feats)（单帧 80 维归一化），GRU 主路吃原特征
+（film_attn_ln，400,675 参数，自 best_v5fa.pt 初始化 26 键匹配）。
+离线 sanity（full-CMVN 微调 2 epoch）：干净 91.2% / 增广 80.6%——
+**LN 抹去逐帧能量/响度线索，增广离线掉 8.8pp，破坏离线能力，放弃**。
+
+### 方案 2：cosine 注意力（部分成功，当前最好）
+Q/K 投影后各自 L2 归一化 + 可学温度（logit_scale 初始 exp(2.64)≈14），
+主路与 v5fa 完全一致不加 LN（film_attn_cos，400,516 参数）。
+
+| 阶段 | 干净 e2e | 增广 e2e | 说明 |
+|---|---|---|---|
+| 离线 sanity（best_v5cos_off.pt, full CMVN） | 92.4% | 81.6% | 归一化仍损失部分增广能力 (vs v5fa 89.4%) |
+| 同模型直接流式 (EMA, 未微调) | 85.5% | **87.0%** | **增广漂移已免疫**（vs v5_stream 的 71.0%），但干净敏感 |
+| EMA 微调 ep01 | 91.5% | 83.0% | |
+| **EMA 微调 ep02（最终 best_v5s.pt）** | **92.0%** | **85.0%** | 干净过线, 增广差 2.0pp |
+| EMA 微调 ep03 (val best-F1) | 92.5% | 79.5% | F1 选点偏干净, 弃 |
+| EMA 微调 ep04 | 92.5% | 76.0% | 过拟合干净方向 |
+
+### 验收结论：**未完全达标**（干净 92.0% ≥91.5% ✓；增广 85.0% < 87% ✗ 差 2.0pp）
+- 修复**方向正确**：cosine 归一化让增广漂移免疫（未微调即 87.0% ≈ 其离线水平）
+- 但归一化本身付出了增广绝对水平代价（89.4%→81.6%），EMA 微调在 50/50 数据上
+  把操作点推向干净，两条件无法同时过线
+
+### 下一步建议（按预期收益）
+1. **aug 加权 EMA 微调**：微调数据增广样本加权 ×2 或纯增广微调，把操作点拉回增广
+   （预估计量：ep02 的干净 92.0% 会降 ~1pp 换增广 +2pp，有望双线过）
+2. **per-frame CMVN 全量重训**：让归一化成为训练默认而非补丁（预计 2-3h）
+3. 方案 1 变体：LN 只加 query 但残差保持 h=q（不拆 res_proj）——LN 版的退化
+   可能来自拆路而非 LN 本身
+
+### 交付
+`models/pvad/pvad_v5s_stream.onnx`（parity 4.98e-06）+ `pvad_v5s_stream.md`、
+`best_v5s.pt`(=ep02)/`best_v5s_ep0{1..4}.pt`/`best_v5cos_off.pt`/`best_v5ln_off.pt`
++ 各 train_log；`train_pvad.py`（CrossAttn cosine 开关 + film_attn_ln/cos 类）、
+`export_stream_onnx.py`（wrapper 兼容 ln/res_proj 变体）。
+best_v5s.pt 覆盖了上一轮的失败版本（规范命名要求）；其余 v1-v5 产物未动。
+
+### 12.1 aug 加权 EMA 微调（同日追加，未达标，保留 ep02）
+- 配置：`--aug-weight`（src=="v2" 样本 loss 加权，无 src 标记的后补负样本权重 1，
+  约 83% 增广样本被覆盖）；起点 best_v5s(ep02)；EMA 特征；val 两条件 e2e 选点
+  （`scripts/select_v5s.py`，EMA 特征 + torch 整段前向 ≡ 流式）
+- 结果：aug×2 ×2ep → val 83.4/79.8；aug×1.5 ×1ep → val 87.0/83.8；
+  均不如 ep02 的 val 87.0/88.5。**aug 加权只推高双条件误打断，未拉回操作点**，
+  两轮实验后确认保留 best_v5s(ep02)（test 流式 92.0/85.0）。
+- 结论：操作点紧张不是训练数据占比问题，而是 cosine 归一化后增广绝对水平的
+  上限问题；下一步仍指向 per-frame CMVN 全量重训（把归一化作为训练默认）
+  或接受 ep02 按场景部署（干净优先换 v5s，强噪留 v4_stream）。
+
+---
+
+## 13. v6（2026-08-28）：per-frame CMVN 全量重训 —— 达标失败但证明一件事
+
+### 目的与方案
+让训练分布与流式部署天然一致（无跨帧统计 → 零漂移、零 warm-up），
+攻流式双线（干净 ≥91.5 / 增广 ≥87）。特征：每帧 80 维独立**减均值不除 std**
+（LayerNorm 除 std 的失败教训——保留帧间能量差）。对照 arm mean+std。
+架构不变（film_attn_cos，400,516），从头 15 epoch，12000 条，[1,2,3]。
+
+### 对照 arm（各 2 epoch sanity，val 两条件 e2e）
+mean-only 84.2/70.8 vs mean+std 84.6/69.2 → **mean-only 胜**（增广 +1.6pp），
+与 LayerNorm 失败经验一致。
+
+### 结果（best=ep13，val 选点；ONNX 对齐 <1e-5）
+
+| 模型 | 离线干净 | 离线增广 | 流式干净 | 流式增广 |
+|---|---|---|---|---|
+| v6 ep13 | 89.4% | 79.4% | **90.5%** | **77.5%** |
+| v6 ep10（备选） | 92.2% | 75.6% | — | — |
+| v5s_stream | — | — | 92.0% | 85.0% |
+| v4_stream | — | — | 94.5% | 82.5% |
+
+### 结论（如实）
+1. **流式 ≡ 离线（0.0pp，逐数字相同）**：分布一致性目标完美达成——无漂移、
+   无 warm-up、无状态，这是 v6 唯一但确实的证明点；
+2. **验收未过**：干净 90.5%（差 1.0pp）、增广 77.5%（差 9.5pp）。逐帧减均值
+   抹掉了段级能量动态——模型区分目标/干扰的关键线索（增广误打断 0.17-0.24
+   vs v5fa 的 0.10）。"跨帧统计"不是单纯的部署障碍，它本身承载着判别信息；
+3. 系列最终结论：EMA-CMVN 微调（v4_stream 路径）仍是实时最优折中；
+   v5 离线（pvad_v5.onnx）是批量增广最优；v6 证明 per-frame 归一化牺牲过大，
+   不再沿此方向投入。
+
+### 交付
+`models/pvad/pvad_v6.onnx` + `pvad_v6_stream.onnx` + `pvad_v6.md`（含不达标标注）、
+`best_v6.pt`(=ep13)/`best_v6_ep0{1..15}.pt`/`best_v6pf_s2.pt`/`best_v6pfs_s2.pt`
++ 各 train_log；`precompute_features.py --cmvn perframe/perframe_std`、
+eval 三件套 perframe 适配。v1-v5 产物未动。

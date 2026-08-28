@@ -1,0 +1,35 @@
+{
+ "config": {
+  "train_dir": "data/mixtures_v4/train",
+  "val_dir": "data/mixtures_v4/val",
+  "out_dir": "D:\\ai-app\\double-voice\\models\\pvad",
+  "epochs": 1,
+  "batch": 32,
+  "lr": 0.0001,
+  "target_weight": 3.0,
+  "weight1": 2.0,
+  "max_train": 12000,
+  "workers": 4,
+  "ckpt_name": "best_v5aw15.pt",
+  "log_name": "train_log_v5aw15.json",
+  "cond": "film_attn_cos",
+  "save_all_epochs": false,
+  "feats_subdir": "feats_ema",
+  "init_from": "models/pvad/best_v5s.pt",
+  "aug_weight": 1.5
+ },
+ "n_params": 400516,
+ "epochs": [
+  {
+   "epoch": 1,
+   "train_loss": 0.87274,
+   "elapsed_s": 439.8,
+   "val_loss": 1.13141,
+   "val_acc": 0.78125,
+   "val_target_recall": 0.93663,
+   "val_target_precision": 0.78297,
+   "val_target_f1": 0.85294,
+   "val_far": 0.5473
+  }
+ ]
+}

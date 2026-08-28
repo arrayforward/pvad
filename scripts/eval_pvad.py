@@ -39,9 +39,9 @@ def snr_bucket(snr):
 
 
 @torch.no_grad()
-def frame_metrics(model, test_dir):
+def frame_metrics(model, test_dir, feats_subdir="feats"):
     use_tokens = getattr(model, "USE_TOKENS", False)
-    ds = MixtureDataset(test_dir, use_tokens=use_tokens)
+    ds = MixtureDataset(test_dir, use_tokens=use_tokens, feats_subdir=feats_subdir)
     ld = DataLoader(ds, batch_size=32, shuffle=False, collate_fn=collate,
                     num_workers=0)
     # 按 SNR 分档统计: bucket -> [tp, fp, fn, far_n, far_d, correct, total]
@@ -159,7 +159,7 @@ def e2e(args, model=None):
     stats = {"pvad": {"miss": 0, "false": 0, "ok": 0, "delay": []},
              "asnorm": {"miss": 0, "false": 0, "ok": 0, "delay": []}}
     for idx, r in enumerate(recs):
-        feats = np.load(Path(args.test_dir) / "feats" / f"{r['id']}.npy")
+        feats = np.load(Path(args.test_dir) / args.feats_subdir / f"{r['id']}.npy")
         emb = np.load(Path(args.test_dir) / "emb" / f"{r['id']}.npy")
         labels = np.asarray(r["labels"])
         T = min(len(feats), len(labels))
@@ -252,13 +252,14 @@ def main():
                     help="checkpoint 路径, 默认 models/pvad/best.pt")
     ap.add_argument("--median", type=int, default=0,
                     help="对 PVAD 帧级目标概率做 N 帧中值滤波后再入门控 (e2e)")
+    ap.add_argument("--feats-subdir", default="feats")
     args = ap.parse_args()
     ckpt = Path(args.ckpt) if args.ckpt else None
     model, state = load_model(ckpt)
     print(f"checkpoint {ckpt or '默认'} epoch={state.get('epoch')}, "
           f"params={state.get('n_params'):,}")
     if args.frames or args.all or not args.e2e:
-        frame_metrics(model, args.test_dir)
+        frame_metrics(model, args.test_dir, feats_subdir=args.feats_subdir)
     if args.e2e or args.all:
         e2e(args, model)
     return 0

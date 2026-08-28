@@ -49,12 +49,18 @@ class StreamWrapper(torch.nn.Module):
 
 
 class StreamWrapperV5(torch.nn.Module):
-    """v5 film_attn 的 state 外置封装:
+    """v5 film_attn 系的 state 外置封装 (兼容 ln/cos 变体):
     (feats_chunk, tokens, kv_mask, h0) -> (logits, hN)。"""
 
     def __init__(self, model):
         super().__init__()
+        self.has_ln = hasattr(model, "ln_q")
+        self.has_res = hasattr(model, "res_proj")
+        if self.has_ln:
+            self.ln_q = model.ln_q
         self.in_proj = model.in_proj
+        if self.has_res:
+            self.res_proj = model.res_proj
         self.attn = model.attn
         self.film_in = model.film_in
         self.gru1 = model.gru1
@@ -63,9 +69,11 @@ class StreamWrapperV5(torch.nn.Module):
         self.fc = model.fc
 
     def forward(self, feats_chunk, tokens, kv_mask, h0):
-        q = self.in_proj(feats_chunk)
+        q_in = self.ln_q(feats_chunk) if self.has_ln else feats_chunk
+        q = self.in_proj(q_in)
         a, _ = self.attn(q, tokens, kv_mask)
-        h = q + a
+        res = self.res_proj(feats_chunk) if self.has_res else q
+        h = res + a
         keep = (~kv_mask).float().unsqueeze(-1)
         pooled = (tokens * keep).sum(1) / keep.sum(1).clamp(min=1.0)
         hd = h.shape[-1]
@@ -87,11 +95,12 @@ def main():
 
     state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     cond = state.get("cond", "concat")
-    assert cond in ("film", "film_attn"), f"流式导出仅支持 film/film_attn, 当前 {cond}"
+    assert cond in ("film", "film_attn", "film_attn_ln", "film_attn_cos"), \
+        f"流式导出仅支持 film/film_attn 系, 当前 {cond}"
     model = MODELS[cond]()
     model.load_state_dict(state["model"])
     model.eval()
-    v5 = cond == "film_attn"
+    v5 = cond != "film"
     wrapped = StreamWrapperV5(model) if v5 else StreamWrapper(model)
     wrapped.eval()
     print(f"ckpt ep{state.get('epoch')}, params={state.get('n_params'):,}")

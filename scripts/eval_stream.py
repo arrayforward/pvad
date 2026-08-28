@@ -62,7 +62,16 @@ def cmvn_running_prior(x, m0, n0=100):
     return x - (n0 * m0[None, :] + c) / (n0 + n)
 
 
-CMVN = {"running": cmvn_running, "sliding": cmvn_sliding, "ema": cmvn_ema}
+def cmvn_perframe(x, with_std=False):
+    """per-frame CMVN: 每帧独立减均值 (v6; 无跨帧统计, 流式/离线天然一致)。"""
+    y = x - x.mean(axis=1, keepdims=True)
+    if with_std:
+        y = y / (x.std(axis=1, keepdims=True) + 1e-5)
+    return y
+
+
+CMVN = {"running": cmvn_running, "sliding": cmvn_sliding, "ema": cmvn_ema,
+        "perframe": cmvn_perframe}
 
 
 def p2_full(sess, feats_cmvn, emb, tokens=None):
@@ -137,7 +146,8 @@ def main():
     ap.add_argument("--analyze", action="store_true")
     ap.add_argument("--e2e", action="store_true")
     ap.add_argument("--cmvn", choices=["running", "sliding", "ema",
-                                       "running_prior", "ema_prior"], default="ema")
+                                       "running_prior", "ema_prior", "perframe"],
+                    default="ema")
     ap.add_argument("--alpha", type=float, default=0.02)
     ap.add_argument("--prior-n0", type=int, default=100,
                     help="running_prior 的伪计数 (enrollment 均值先验强度)")
@@ -148,9 +158,10 @@ def main():
 
     full_path = args.full_onnx or str(FULL_ONNX)
     stream_path = args.stream_onnx or str(STREAM_ONNX)
-    use_tokens = "v5" in stream_path
     sess_full = ort.InferenceSession(full_path, providers=["CPUExecutionProvider"])
     sess_stream = ort.InferenceSession(stream_path, providers=["CPUExecutionProvider"])
+    # v5/v6 模型的流式输入含 enroll_tokens
+    use_tokens = "enroll_tokens" in [i.name for i in sess_stream.get_inputs()]
 
     for tag, td in (("干净", ROOT / "data" / "mixtures" / "test"),
                     ("增广", ROOT / "data" / "mixtures_v2" / "test")):
@@ -160,7 +171,7 @@ def main():
         per_variant = {k: {"maxdiff": [], "shift": [], "warmup": [],
                            "gate": {"ok": 0, "miss": 0, "false": 0}}
                        for k in ["running", "sliding", "ema",
-                                 "running_prior", "ema_prior"]}
+                                 "running_prior", "ema_prior", "perframe"]}
         base_gate = {"ok": 0, "miss": 0, "false": 0}
         for r in recs:
             pcm, _ = read_wav(ROOT / r["path"])
@@ -177,7 +188,10 @@ def main():
             # enrollment fbank 均值先验 (同说话人同信道)
             epcm, _ = read_wav(ROOT / r["enrollment"])
             m0 = fbank(epcm).astype(np.float64).mean(axis=0)
-            p_base = p2_full(sess_full, cmvn_full(raw).astype(np.float32), emb,
+            # v6 (perframe): 基线用同一逐帧归一化 (离线=流式同分布)
+            base_fx = (cmvn_perframe(raw) if args.cmvn == "perframe"
+                       else cmvn_full(raw))
+            p_base = p2_full(sess_full, base_fx.astype(np.float32), emb,
                              tokens=toks)
             trig_base = gate_trigger(p_base)
             if args.e2e:

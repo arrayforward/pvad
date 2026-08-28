@@ -38,6 +38,17 @@ def cmvn_ema_np(x, alpha=0.02):
     return out
 
 
+def cmvn_perframe_np(x, with_std=False):
+    """per-frame CMVN: 每帧 80 维独立减均值 (无跨帧统计)。
+    with_std=True 时再除 std (对照 arm; mean-only 保留帧间能量差)。"""
+    import numpy as np
+    m = x.mean(axis=1, keepdims=True)
+    y = x - m
+    if with_std:
+        y = y / (x.std(axis=1, keepdims=True) + 1e-5)
+    return y
+
+
 def process_one(args):
     uid, mix_path, enroll_path, feat_out, emb_out, cmvn_mode = args
     try:
@@ -47,6 +58,11 @@ def process_one(args):
             feats = fbank(pcm)
             if cmvn_mode == "ema":
                 feats = cmvn_ema_np(feats.astype(np.float64)).astype(np.float32)
+            elif cmvn_mode == "perframe":
+                feats = cmvn_perframe_np(feats.astype(np.float64)).astype(np.float32)
+            elif cmvn_mode == "perframe_std":
+                feats = cmvn_perframe_np(feats.astype(np.float64),
+                                         with_std=True).astype(np.float32)
             else:
                 feats = mean_normalize(feats)
             np.save(feat_out, feats.astype(np.float32))
@@ -82,8 +98,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
     ap.add_argument("--workers", type=int, default=8)
-    ap.add_argument("--cmvn", choices=["full", "ema"], default="full",
-                    help="ema 时特征写入 feats_ema/ (流式因果 CMVN), emb 复用跳过")
+    ap.add_argument("--cmvn", choices=["full", "ema", "perframe", "perframe_std"],
+                    default="full",
+                    help="ema->feats_ema/, perframe->feats_pf/ (逐帧减均值, 无跨帧统计), "
+                         "perframe_std->feats_pfs/ (逐帧均值+方差)")
     ap.add_argument("--tokens", action="store_true",
                     help="只算多帧 enrollment tokens -> emb_tokens/<id>.npy [N,192]")
     args = ap.parse_args()
@@ -108,7 +126,8 @@ def main():
         print(f"完成 {done - errs}/{len(tasks)}, 失败 {errs}")
         return 1 if errs else 0
 
-    feat_dir = "feats_ema" if args.cmvn == "ema" else "feats"
+    feat_dir = {"ema": "feats_ema", "perframe": "feats_pf",
+                "perframe_std": "feats_pfs"}.get(args.cmvn, "feats")
     (d / feat_dir).mkdir(exist_ok=True)
     (d / "emb").mkdir(exist_ok=True)
     tasks = [(r["id"], r["path"], r["enrollment"],

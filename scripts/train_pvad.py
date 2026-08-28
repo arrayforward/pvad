@@ -85,14 +85,17 @@ class PvadModelAttn(nn.Module):
 class CrossAttn(nn.Module):
     """手写 2 头交叉注意力 (ONNX 17 友好; nn.MultiheadAttention 导出版本转换有坑)。"""
 
-    def __init__(self, d_model=128, emb_dim=EMB_DIM, heads=2):
+    def __init__(self, d_model=128, emb_dim=EMB_DIM, heads=2, cosine=False):
         super().__init__()
         self.heads = heads
         self.d_head = d_model // heads
+        self.cosine = cosine
         self.q = nn.Linear(d_model, d_model)
         self.k = nn.Linear(emb_dim, d_model)
         self.v = nn.Linear(emb_dim, d_model)
         self.o = nn.Linear(d_model, d_model)
+        if cosine:
+            self.logit_scale = nn.Parameter(torch.tensor(2.64))  # exp ~14
 
     def forward(self, q_in, kv, kv_mask=None):
         B, T, _ = q_in.shape
@@ -101,7 +104,13 @@ class CrossAttn(nn.Module):
         q = self.q(q_in).view(B, T, H, dh).transpose(1, 2)   # [B,H,T,dh]
         k = self.k(kv).view(B, N, H, dh).transpose(1, 2)     # [B,H,N,dh]
         v = self.v(kv).view(B, N, H, dh).transpose(1, 2)
-        scores = q @ k.transpose(-1, -2) / float(dh) ** 0.5  # [B,H,T,N]
+        if self.cosine:
+            # Q/K 各自 L2 归一化 (尺度不变), 可学温度
+            q = q / q.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+            k = k / k.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+            scores = (q @ k.transpose(-1, -2)) * self.logit_scale.exp()
+        else:
+            scores = q @ k.transpose(-1, -2) / float(dh) ** 0.5  # [B,H,T,N]
         if kv_mask is not None:
             scores = scores.masked_fill(kv_mask[:, None, None, :], -1e9)
         a = torch.softmax(scores, dim=-1) @ v                # [B,H,T,dh]
@@ -168,12 +177,92 @@ MODELS = {"concat": PvadModel, "film": PvadModelFiLM, "attn": PvadModelAttn,
           "attn5": PvadModelAttnV5, "film_attn": PvadModelFilmAttnV5}
 
 
+class PvadModelFilmAttnV5LN(nn.Module):
+    """v5 修复版 (cond="film_attn_ln"): 双路特征 —— 注意力 query 路径吃逐帧
+    LayerNorm 特征 (单帧 80 维归一化, 免疫 CMVN 漂移), GRU 主路吃原 (EMA-)CMVN
+    特征; FiLM 与 GRU 结构同 film_attn。"""
+
+    USE_TOKENS = True
+
+    def __init__(self, feat_dim=FEAT_DIM, emb_dim=EMB_DIM, hidden=128, heads=2):
+        super().__init__()
+        self.ln_q = nn.LayerNorm(feat_dim)
+        self.in_proj = nn.Linear(feat_dim, hidden)   # query 投影 (attn 专用)
+        self.res_proj = nn.Linear(feat_dim, hidden)  # GRU 主路投影
+        self.attn = CrossAttn(hidden, emb_dim, heads)
+        self.film_in = nn.Linear(emb_dim, 2 * hidden)
+        self.gru1 = nn.GRU(hidden, hidden, batch_first=True)
+        self.film_h = nn.Linear(emb_dim, 2 * hidden)
+        self.gru2 = nn.GRU(hidden, hidden, batch_first=True)
+        self.fc = nn.Linear(hidden, NUM_CLASSES)
+
+    def forward(self, feats, tokens, kv_mask=None):
+        q = self.in_proj(self.ln_q(feats))
+        a, _ = self.attn(q, tokens, kv_mask)
+        h = self.res_proj(feats) + a
+        if kv_mask is not None:
+            keep = (~kv_mask).float().unsqueeze(-1)
+            pooled = (tokens * keep).sum(1) / keep.sum(1).clamp(min=1.0)
+        else:
+            pooled = tokens.mean(1)
+        gb1 = self.film_in(pooled).unsqueeze(1)
+        hd = h.shape[-1]
+        h = h * (1.0 + gb1[..., :hd]) + gb1[..., hd:]
+        h, _ = self.gru1(h)
+        gb2 = self.film_h(pooled).unsqueeze(1)
+        h = h * (1.0 + gb2[..., :hd]) + gb2[..., hd:]
+        h, _ = self.gru2(h)
+        return self.fc(h)
+
+
+class PvadModelFilmAttnV5Cos(nn.Module):
+    """v5 修复版方案2 (cond="film_attn_cos"): cosine 注意力 (Q/K 投影后各自 L2
+    归一化 + 可学温度, 尺度不变), 主路与 v5fa 完全一致 (不加 LayerNorm)。"""
+
+    USE_TOKENS = True
+
+    def __init__(self, feat_dim=FEAT_DIM, emb_dim=EMB_DIM, hidden=128, heads=2):
+        super().__init__()
+        self.in_proj = nn.Linear(feat_dim, hidden)
+        self.res_proj = nn.Linear(feat_dim, hidden)
+        self.attn = CrossAttn(hidden, emb_dim, heads, cosine=True)
+        self.film_in = nn.Linear(emb_dim, 2 * hidden)
+        self.gru1 = nn.GRU(hidden, hidden, batch_first=True)
+        self.film_h = nn.Linear(emb_dim, 2 * hidden)
+        self.gru2 = nn.GRU(hidden, hidden, batch_first=True)
+        self.fc = nn.Linear(hidden, NUM_CLASSES)
+
+    def forward(self, feats, tokens, kv_mask=None):
+        q = self.in_proj(feats)
+        a, _ = self.attn(q, tokens, kv_mask)
+        h = self.res_proj(feats) + a
+        if kv_mask is not None:
+            keep = (~kv_mask).float().unsqueeze(-1)
+            pooled = (tokens * keep).sum(1) / keep.sum(1).clamp(min=1.0)
+        else:
+            pooled = tokens.mean(1)
+        gb1 = self.film_in(pooled).unsqueeze(1)
+        hd = h.shape[-1]
+        h = h * (1.0 + gb1[..., :hd]) + gb1[..., hd:]
+        h, _ = self.gru1(h)
+        gb2 = self.film_h(pooled).unsqueeze(1)
+        h = h * (1.0 + gb2[..., :hd]) + gb2[..., hd:]
+        h, _ = self.gru2(h)
+        return self.fc(h)
+
+
+MODELS["film_attn_ln"] = PvadModelFilmAttnV5LN
+MODELS["film_attn_cos"] = PvadModelFilmAttnV5Cos
+
+
 class MixtureDataset(Dataset):
-    def __init__(self, mix_dir, max_n=None, feats_subdir="feats", use_tokens=False):
+    def __init__(self, mix_dir, max_n=None, feats_subdir="feats", use_tokens=False,
+                 aug_weight=1.0):
         d = Path(mix_dir)
         self.dir = d
         self.feat_dir = d / feats_subdir
         self.use_tokens = use_tokens
+        self.aug_weight = aug_weight
         emb_dir = "emb_tokens" if use_tokens else "emb"
         self.emb_dir = d / emb_dir
         self.recs = load_labels(d / "labels.jsonl")
@@ -195,15 +284,18 @@ class MixtureDataset(Dataset):
         emb = np.load(self.emb_dir / f"{r['id']}.npy")
         labels = np.asarray(r["labels"], dtype=np.int64)
         T = min(len(feats), len(labels))
-        return feats[:T], emb, labels[:T], r["snr_db"]
+        # 增广样本 (src=="v2") loss 加权; 无 src 标记的 (后补负样本) 权重 1
+        w = self.aug_weight if r.get("src") == "v2" else 1.0
+        return feats[:T], emb, labels[:T], r["snr_db"], w
 
 
 def collate(batch):
-    feats, embs, labels, snrs = zip(*batch)
+    feats, embs, labels, snrs, ws = zip(*batch)
     B = len(batch)
     T = max(f.shape[0] for f in feats)
     x = torch.zeros(B, T, FEAT_DIM)
     y = torch.full((B, T), -100, dtype=torch.long)
+    w = torch.tensor(ws, dtype=torch.float32)
     use_tokens = embs[0].ndim == 2
     if use_tokens:
         N = max(e.shape[0] for e in embs)
@@ -222,7 +314,7 @@ def collate(batch):
             kv_mask[i, :n] = False
         else:
             e[i] = torch.from_numpy(em)
-    return x, e, kv_mask, y
+    return x, e, kv_mask, y, w
 
 
 @torch.no_grad()
@@ -235,7 +327,7 @@ def evaluate(model, loader, class_weight):
     correct = 0
     crit = nn.CrossEntropyLoss(weight=class_weight, ignore_index=-100, reduction="sum")
     use_tokens = getattr(model, "USE_TOKENS", False)
-    for x, e, kv_mask, y in loader:
+    for x, e, kv_mask, y, w in loader:
         logits = model(x, e, kv_mask) if use_tokens else model(x, e)
         tot_loss += crit(logits.reshape(-1, NUM_CLASSES), y.reshape(-1)).item()
         mask = y != -100
@@ -276,7 +368,8 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--ckpt-name", default="best.pt")
     ap.add_argument("--log-name", default="train_log.json")
-    ap.add_argument("--cond", choices=["concat", "film", "attn", "attn5", "film_attn"],
+    ap.add_argument("--cond", choices=["concat", "film", "attn", "attn5", "film_attn",
+                                       "film_attn_ln", "film_attn_cos"],
                     default="concat", help="enrollment 条件机制")
     ap.add_argument("--save-all-epochs", action="store_true",
                     help="每个 epoch 都保存 checkpoint (<ckpt-stem>_epNN.pt), "
@@ -285,6 +378,8 @@ def main():
                     help="特征子目录 (ema 微调用 feats_ema)")
     ap.add_argument("--init-from", default=None,
                     help="从已有 checkpoint 初始化 (微调)")
+    ap.add_argument("--aug-weight", type=float, default=1.0,
+                    help="增广样本 (src==v2) 的 loss 权重 (默认 1)")
     args = ap.parse_args()
 
     torch.set_num_threads(max(1, (os_cpu() or 8)))
@@ -293,7 +388,8 @@ def main():
 
     use_tokens = getattr(MODELS[args.cond], "USE_TOKENS", False)
     train_ds = MixtureDataset(args.train_dir, args.max_train or None,
-                              feats_subdir=args.feats_subdir, use_tokens=use_tokens)
+                              feats_subdir=args.feats_subdir, use_tokens=use_tokens,
+                              aug_weight=args.aug_weight)
     val_ds = MixtureDataset(args.val_dir, feats_subdir=args.feats_subdir,
                             use_tokens=use_tokens)
     print(f"train {len(train_ds)} 条, val {len(val_ds)} 条")
@@ -312,6 +408,11 @@ def main():
             sd = {("gru." + k[5:-2] + "_l" + ("0" if k.startswith("gru1") else "1")
                    if (k.startswith("gru1.") or k.startswith("gru2.")) and k.endswith("l0")
                    else k): v for k, v in sd.items()}
+        if args.cond in ("film_attn_ln", "film_attn_cos"):
+            # v5fa 的 in_proj 同时初始化 query 投影和主路投影
+            for k in list(sd):
+                if k.startswith("in_proj."):
+                    sd["res_proj." + k[len("in_proj."):]] = sd[k].clone()
         # 只保留键名和形状都匹配的 (其余随机初始化)
         ref = model.state_dict()
         sd = {k: v for k, v in sd.items()
@@ -332,14 +433,20 @@ def main():
         model.train()
         t0 = time.time()
         tot, n = 0.0, 0
-        for x, e, kv_mask, y in train_ld:
+        for x, e, kv_mask, y, w in train_ld:
             logits = model(x, e, kv_mask) if use_tokens else model(x, e)
-            loss = crit(logits.reshape(-1, NUM_CLASSES), y.reshape(-1))
+            # 逐帧加权 CE: 样本权重 (增广 xN) 广播到该样本的有效帧
+            lf = nn.functional.cross_entropy(
+                logits.reshape(-1, NUM_CLASSES), y.reshape(-1),
+                weight=class_weight, ignore_index=-100, reduction="none")
+            mask = y.reshape(-1) != -100
+            wf = w.unsqueeze(1).expand(-1, y.shape[1]).reshape(-1)[mask]
+            loss = (lf[mask] * wf).sum() / wf.sum().clamp(min=1e-6)
             opt.zero_grad()
             loss.backward()
             opt.step()
-            tot += loss.item() * (y != -100).sum().item()
-            n += (y != -100).sum().item()
+            tot += loss.item() * wf.sum().item()
+            n += wf.sum().item()
         train_loss = tot / max(n, 1)
         vm = evaluate(model, val_ld, class_weight)
         el = time.time() - t0
