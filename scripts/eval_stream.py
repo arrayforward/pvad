@@ -25,6 +25,7 @@ FULL_ONNX = ROOT / "models" / "pvad" / "pvad_v4.onnx"
 STREAM_ONNX = ROOT / "models" / "pvad" / "pvad_v4_stream.onnx"
 CHUNK = 5
 FRAME_S = 0.01
+USE_TOKENS = False  # --full-onnx/--stream-onnx 为 v5 时置 True
 
 
 def cmvn_full(x):
@@ -64,19 +65,31 @@ def cmvn_running_prior(x, m0, n0=100):
 CMVN = {"running": cmvn_running, "sliding": cmvn_sliding, "ema": cmvn_ema}
 
 
-def p2_full(sess, feats_cmvn, emb):
-    lg = sess.run(None, {"feats": feats_cmvn[None].astype(np.float32),
-                         "emb": emb[None]})[0]
+def p2_full(sess, feats_cmvn, emb, tokens=None):
+    if tokens is not None:
+        lg = sess.run(None, {"feats": feats_cmvn[None].astype(np.float32),
+                             "enroll_tokens": tokens[None].astype(np.float32),
+                             "enroll_mask": np.zeros((1, len(tokens)), dtype=bool)})[0]
+    else:
+        lg = sess.run(None, {"feats": feats_cmvn[None].astype(np.float32),
+                             "emb": emb[None]})[0]
     return softmax(lg[0])[:, 2]
 
 
-def p2_stream(sess, feats_cmvn, emb, chunk=CHUNK):
+def p2_stream(sess, feats_cmvn, emb, chunk=CHUNK, tokens=None):
     h = np.zeros((2, 1, 128), dtype=np.float32)
     outs = []
+    v5 = tokens is not None
     for s in range(0, len(feats_cmvn), chunk):
-        lg, h = sess.run(None, {"feats_chunk": feats_cmvn[None, s:s + chunk]
-                                .astype(np.float32),
-                                "emb": emb[None], "h0": h})
+        if v5:
+            lg, h = sess.run(None, {
+                "feats_chunk": feats_cmvn[None, s:s + chunk].astype(np.float32),
+                "enroll_tokens": tokens[None].astype(np.float32),
+                "enroll_mask": np.zeros((1, len(tokens)), dtype=bool), "h0": h})
+        else:
+            lg, h = sess.run(None, {
+                "feats_chunk": feats_cmvn[None, s:s + chunk].astype(np.float32),
+                "emb": emb[None], "h0": h})
         outs.append(lg[0])
     return softmax(np.concatenate(outs, axis=0))[:, 2]
 
@@ -129,10 +142,15 @@ def main():
     ap.add_argument("--prior-n0", type=int, default=100,
                     help="running_prior 的伪计数 (enrollment 均值先验强度)")
     ap.add_argument("--max-n", type=int, default=100)
+    ap.add_argument("--full-onnx", default=None)
+    ap.add_argument("--stream-onnx", default=None)
     args = ap.parse_args()
 
-    sess_full = ort.InferenceSession(str(FULL_ONNX), providers=["CPUExecutionProvider"])
-    sess_stream = ort.InferenceSession(str(STREAM_ONNX), providers=["CPUExecutionProvider"])
+    full_path = args.full_onnx or str(FULL_ONNX)
+    stream_path = args.stream_onnx or str(STREAM_ONNX)
+    use_tokens = "v5" in stream_path
+    sess_full = ort.InferenceSession(full_path, providers=["CPUExecutionProvider"])
+    sess_stream = ort.InferenceSession(stream_path, providers=["CPUExecutionProvider"])
 
     for tag, td in (("干净", ROOT / "data" / "mixtures" / "test"),
                     ("增广", ROOT / "data" / "mixtures_v2" / "test")):
@@ -147,14 +165,20 @@ def main():
         for r in recs:
             pcm, _ = read_wav(ROOT / r["path"])
             raw = fbank(pcm).astype(np.float64)
-            emb = np.load(td / "emb" / f"{r['id']}.npy")
+            if use_tokens:
+                emb = None
+                toks = np.load(td / "emb_tokens" / f"{r['id']}.npy")
+            else:
+                emb = np.load(td / "emb" / f"{r['id']}.npy")
+                toks = None
             labels = np.asarray(r["labels"])
             T = min(len(raw), len(labels))
             raw, labels = raw[:T], labels[:T]
             # enrollment fbank 均值先验 (同说话人同信道)
             epcm, _ = read_wav(ROOT / r["enrollment"])
             m0 = fbank(epcm).astype(np.float64).mean(axis=0)
-            p_base = p2_full(sess_full, cmvn_full(raw).astype(np.float32), emb)
+            p_base = p2_full(sess_full, cmvn_full(raw).astype(np.float32), emb,
+                             tokens=toks)
             trig_base = gate_trigger(p_base)
             if args.e2e:
                 base_gate[judge(trig_base, r["overlap_frames"], labels)] += 1
@@ -170,7 +194,7 @@ def main():
                     fx = cmvn_ema(raw, args.alpha)
                 else:
                     fx = CMVN[name](raw)
-                pv = p2_stream(sess_stream, fx.astype(np.float32), emb)
+                pv = p2_stream(sess_stream, fx.astype(np.float32), emb, tokens=toks)
                 d = np.abs(p_base - pv)
                 st = per_variant[name]
                 st["maxdiff"].append(d.max())

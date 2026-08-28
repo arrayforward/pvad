@@ -28,10 +28,11 @@ static std::string now_str() {
 }
 
 void DemoCore::append_segment(const std::vector<float>& emb, const std::string& wav,
-                              double duration_s, const std::string& time) {
+                              double duration_s, const std::string& time,
+                              const std::vector<std::vector<float>>& tokens) {
     if (emb_sum_.empty()) emb_sum_.assign(emb.size(), 0.f);
     for (size_t i = 0; i < emb.size(); i++) emb_sum_[i] += emb[i];
-    segs_.push_back(SegRecord{wav, duration_s, time, emb});
+    segs_.push_back(SegRecord{wav, duration_s, time, emb, tokens});
     n_emb_ += 1;
     centroid_ = emb_sum_;
     l2_normalize(centroid_);
@@ -64,8 +65,9 @@ bool DemoCore::enroll_samples(const float* pcm, size_t n, std::string& err,
     if (!spk_) { err = "core not initialized"; return false; }
     try {
         auto emb = spk_->embed(pcm, (int)n);
+        auto toks = spk_->embed_tokens(pcm, (int)n);  // 1s 子帧 tokens（v5 用，<1s 则为空）
         append_segment(emb, wav, duration_s > 0 ? duration_s : n / 16000.0,
-                       time.empty() ? now_str() : time);
+                       time.empty() ? now_str() : time, toks);
         // 累计注册音频 fbank（流式 CMVN 先验用；与 CAM++ 同参数，不影响 embedding）
         Fbank fbank;
         std::vector<float> feats;
@@ -148,12 +150,45 @@ bool DemoCore::precompute_file(const float* pcm, size_t n, std::string& err) {
     if (T < 4) { err = "audio too short"; return false; }
     mean_normalize(feats, T, 80);
     try {
-        p2_pre_ = pvad_->target_probs(feats.data(), T, centroid_.data());
+        auto toks = all_tokens();
+        p2_pre_ = pvad_->target_probs(feats.data(), T, centroid_.data(), &toks);
     } catch (const std::exception& e) {
         err = e.what();
         return false;
     }
     return true;
+}
+
+std::vector<std::vector<float>> DemoCore::all_tokens() const {
+    std::vector<std::vector<float>> out;
+    for (auto& s : segs_)
+        for (auto& t : s.tokens) out.push_back(t);
+    return out;
+}
+
+int DemoCore::rebuild_missing_tokens(const std::string& qt_demo_dir) {
+    if (!spk_) return (int)segs_.size();
+    int failed = 0;
+    for (auto& s : segs_) {
+        if (!s.tokens.empty() || s.wav.empty() || s.wav == "(imported tpl.bin)") continue;
+        std::string path = s.wav;
+        // 相对路径相对 qt_demo 目录解析（recordings/rec_*.wav）
+        FILE* probe = fopen(path.c_str(), "rb");
+        if (!probe) {
+            std::string alt = qt_demo_dir + "/" + s.wav;
+            probe = fopen(alt.c_str(), "rb");
+            if (probe) path = alt;
+        }
+        if (!probe) { failed++; continue; }
+        fclose(probe);
+        try {
+            WavData wd = read_wav(path);
+            s.tokens = spk_->embed_tokens(wd.samples.data(), (int)wd.samples.size());
+        } catch (...) {
+            failed++;
+        }
+    }
+    return failed;
 }
 
 FrameEvent DemoCore::feed_frame(const float* frame160) {
@@ -180,7 +215,8 @@ FrameEvent DemoCore::feed_frame(const float* frame160) {
             if (T >= 4) {
                 mean_normalize(feats, T, 80);
                 try {
-                    auto p2 = pvad_->target_probs(feats.data(), T, centroid_.data());
+                    auto toks = all_tokens();
+                    auto p2 = pvad_->target_probs(feats.data(), T, centroid_.data(), &toks);
                     ev.p = p2.back();
                     if (frame_idx_ >= kWarmupFrames) {
                         ev.interrupt = gate_.update(ev.p);

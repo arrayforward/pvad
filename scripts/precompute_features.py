@@ -60,16 +60,54 @@ def process_one(args):
         return uid, str(e)
 
 
+def process_tokens(args):
+    """多帧 enrollment 表示: 1s 子段各过一个 CAM++ -> [N,192]。
+    规则: 整 1s (16000 采样) 切分, 不足 1s 的尾段丢弃; enrollment >=3s 故 N>=3。"""
+    uid, enroll_path, out_path = args
+    try:
+        if Path(out_path).exists():
+            return uid, None
+        from pvad_common import read_wav
+        pcm, sr = read_wav(ROOT / enroll_path)
+        emb = _get_embedder()
+        n = len(pcm) // 16000
+        toks = [emb.embed(pcm[i * 16000:(i + 1) * 16000]) for i in range(n)]
+        np.save(out_path, np.stack(toks).astype(np.float32))
+        return uid, None
+    except Exception as e:  # noqa: BLE001
+        return uid, str(e)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--cmvn", choices=["full", "ema"], default="full",
                     help="ema 时特征写入 feats_ema/ (流式因果 CMVN), emb 复用跳过")
+    ap.add_argument("--tokens", action="store_true",
+                    help="只算多帧 enrollment tokens -> emb_tokens/<id>.npy [N,192]")
     args = ap.parse_args()
 
     d = Path(args.dir).resolve()
     recs = load_labels(d / "labels.jsonl")
+    if args.tokens:
+        (d / "emb_tokens").mkdir(exist_ok=True)
+        tasks = [(r["id"], r["enrollment"],
+                  str(d / "emb_tokens" / f"{r['id']}.npy")) for r in recs]
+        print(f"{d.name}: {len(tasks)} 条待算 enrollment tokens")
+        errs = done = 0
+        with ProcessPoolExecutor(max_workers=args.workers) as ex:
+            for uid, err in ex.map(process_tokens, tasks, chunksize=16):
+                done += 1
+                if err:
+                    errs += 1
+                    if errs <= 5:
+                        print(f"  [错误] {uid}: {err}")
+                if done % 2000 == 0:
+                    print(f"  进度 {done}/{len(tasks)}")
+        print(f"完成 {done - errs}/{len(tasks)}, 失败 {errs}")
+        return 1 if errs else 0
+
     feat_dir = "feats_ema" if args.cmvn == "ema" else "feats"
     (d / feat_dir).mkdir(exist_ok=True)
     (d / "emb").mkdir(exist_ok=True)

@@ -60,6 +60,40 @@ bool jfloats(const std::string& s, const char* key, std::vector<float>& out) {
     return *cur == ']';
 }
 
+// 从 cur 处解析一个 '[' ... ']' 的 float 数组；cur 推进到 ']' 之后
+static const char* parse_farr(const char* cur, std::vector<float>& out) {
+    out.clear();
+    if (*cur != '[') return nullptr;
+    cur++;
+    while (*cur && *cur != ']') {
+        if (*cur == ',' || *cur == ' ' || *cur == '\n' || *cur == '\t') { cur++; continue; }
+        char* end = nullptr;
+        float v = strtof(cur, &end);
+        if (end == cur) return nullptr;
+        out.push_back(v);
+        cur = end;
+    }
+    if (*cur != ']') return nullptr;
+    return cur + 1;
+}
+
+// 提取 "tokens": [[...],[...],...]（嵌套数组）
+bool jtokens(const std::string& s, std::vector<std::vector<float>>& out) {
+    std::string pat = "\"tokens\": [";
+    size_t p = s.find(pat);
+    if (p == std::string::npos) return false;
+    const char* cur = s.c_str() + p + pat.size();
+    out.clear();
+    while (true) {
+        while (*cur == ' ' || *cur == '\n' || *cur == '\t' || *cur == ',') cur++;
+        if (*cur == ']') return true;  // tokens 数组结束
+        std::vector<float> one;
+        cur = parse_farr(cur, one);
+        if (!cur) return false;
+        out.push_back(std::move(one));
+    }
+}
+
 }  // namespace
 
 bool EnrollStore::save(const std::string& dir, const std::vector<SegRecord>& segs,
@@ -89,7 +123,18 @@ bool EnrollStore::save(const std::string& dir, const std::vector<SegRecord>& seg
                     json_escape(s.wav).c_str(), s.duration_s, json_escape(s.time).c_str());
             for (size_t j = 0; j < s.emb.size(); j++)
                 fprintf(f, "%s%.9g", j ? ", " : "", (double)s.emb[j]);
-            fprintf(f, "]}%s\n", i + 1 < segs.size() ? "," : "");
+            fprintf(f, "]");
+            if (!s.tokens.empty()) {
+                fprintf(f, ", \"tokens\": [");
+                for (size_t k = 0; k < s.tokens.size(); k++) {
+                    fprintf(f, "%s[", k ? ", " : "");
+                    for (size_t j = 0; j < s.tokens[k].size(); j++)
+                        fprintf(f, "%s%.9g", j ? ", " : "", (double)s.tokens[k][j]);
+                    fprintf(f, "]");
+                }
+                fprintf(f, "]");
+            }
+            fprintf(f, "}%s\n", i + 1 < segs.size() ? "," : "");
         }
         fprintf(f, "]}\n");
         fclose(f);
@@ -144,6 +189,7 @@ bool EnrollStore::load(const std::string& dir, std::vector<SegRecord>& segs,
                     err = "bad embedding in " + seg_path;
                     return false;
                 }
+                jtokens(rec, s.tokens);  // 可选字段（旧格式无 tokens -> 空，走重算升级路径）
                 segs.push_back(std::move(s));
                 pos = p + 1;
             }

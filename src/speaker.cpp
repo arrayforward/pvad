@@ -55,6 +55,14 @@ std::vector<float> SpeakerEmbedder::embed(const float* pcm, int num_samples) {
     return emb;
 }
 
+std::vector<std::vector<float>> SpeakerEmbedder::embed_tokens(const float* pcm, int num_samples) {
+    std::vector<std::vector<float>> toks;
+    int n = num_samples / 16000;  // 整 1s 切分，尾段丢弃
+    toks.reserve(n);
+    for (int i = 0; i < n; i++) toks.push_back(embed(pcm + (size_t)i * 16000, 16000));
+    return toks;
+}
+
 void l2_normalize(std::vector<float>& v) {
     double s = 0;
     for (float x : v) s += (double)x * x;
@@ -100,7 +108,7 @@ void tnorm_stats(const Template& tpl, const std::vector<float>& emb, int topk, f
 void save_template(const std::string& path, const Template& tpl) {
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) throw std::runtime_error("cannot write template: " + path);
-    int32_t version = 3, dim = (int32_t)tpl.pos.size();
+    int32_t version = 4, dim = (int32_t)tpl.pos.size();
     fwrite(&version, 4, 1, f);
     fwrite(&dim, 4, 1, f);
     fwrite(tpl.pos.data(), 4, dim, f);
@@ -115,6 +123,10 @@ void save_template(const std::string& path, const Template& tpl) {
     int32_t n_cohort = (int32_t)tpl.cohort.size();
     fwrite(&n_cohort, 4, 1, f);
     for (auto& c : tpl.cohort) fwrite(c.data(), 4, dim, f);
+    // v4 追加：多帧 enrollment tokens
+    int32_t n_tok = (int32_t)tpl.tokens.size();
+    fwrite(&n_tok, 4, 1, f);
+    for (auto& t : tpl.tokens) fwrite(t.data(), 4, dim, f);
     fclose(f);
 }
 
@@ -122,7 +134,7 @@ Template load_template(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) throw std::runtime_error("cannot open template: " + path);
     int32_t version = 0, dim = 0;
-    if (fread(&version, 4, 1, f) != 1 || version != 3 ||
+    if (fread(&version, 4, 1, f) != 1 || (version != 3 && version != 4) ||
         fread(&dim, 4, 1, f) != 1 || dim <= 0 || dim > 4096) {
         fclose(f);
         throw std::runtime_error("bad or old-version template file: " + path);
@@ -165,6 +177,21 @@ Template load_template(const std::string& path) {
             throw std::runtime_error("bad template file: " + path);
         }
         tpl.cohort.push_back(std::move(c));
+    }
+    if (version == 4) {
+        int32_t n_tok = 0;
+        if (fread(&n_tok, 4, 1, f) != 1 || n_tok < 0 || n_tok > 4096) {
+            fclose(f);
+            throw std::runtime_error("bad template file: " + path);
+        }
+        for (int32_t i = 0; i < n_tok; i++) {
+            std::vector<float> t(dim);
+            if (fread(t.data(), 4, dim, f) != (size_t)dim) {
+                fclose(f);
+                throw std::runtime_error("bad template file: " + path);
+            }
+            tpl.tokens.push_back(std::move(t));
+        }
     }
     fclose(f);
     return tpl;

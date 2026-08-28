@@ -25,6 +25,7 @@ struct SegRecord {
     double duration_s = 0;
     std::string time;       // 录入时间 "yyyy-MM-dd HH:mm:ss"
     std::vector<float> emb; // 该段 L2 归一化 embedding（192 维）
+    std::vector<std::vector<float>> tokens;  // 该段 1s 子帧 tokens（v5 交叉注意力用）
 };
 
 class DemoCore {
@@ -60,6 +61,11 @@ public:
                           const std::vector<SegRecord>& segs);
     // 从逐段记录精确重建（emb_sum 按序累加，与增量注册逐位一致）
     void set_segments(const std::vector<SegRecord>& segs);
+    // 对缺少 tokens 的段从来源 wav 重算（旧格式 segments.json 升级路径）；
+    // qt_demo_dir 用于解析相对 wav 路径；返回重算失败的段数（不抛异常）
+    int rebuild_missing_tokens(const std::string& qt_demo_dir);
+    // 全部段的 tokens 按序拼接（v5 模型输入）
+    std::vector<std::vector<float>> all_tokens() const;
     const std::vector<SegRecord>& segments() const { return segs_; }
     const std::vector<float>& centroid() const { return centroid_; }
     bool enrolled() const { return has_tpl_; }
@@ -76,7 +82,8 @@ public:
 
 private:
     void append_segment(const std::vector<float>& emb, const std::string& wav,
-                        double duration_s, const std::string& time);
+                        double duration_s, const std::string& time,
+                        const std::vector<std::vector<float>>& tokens = {});
 
     std::unique_ptr<SpeakerEmbedder> spk_;
     std::unique_ptr<Pvad> pvad_;

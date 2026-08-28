@@ -11,35 +11,74 @@ static std::wstring widen3(const std::string& s) {
 }
 
 Pvad::Pvad(const std::string& model_path) {
-    // ERROR 级别: 屏蔽导出时示例维度 137 带来的输出 shape 校验警告（动态 T 实际正常）
+    // ERROR 级别: 屏蔽导出时示例维度带来的输出 shape 校验警告（动态 T 实际正常）
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "pvad");
     Ort::SessionOptions so;
     so.SetIntraOpNumThreads(2);
     so.SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);
     session_ = std::make_unique<Ort::Session>(*env_, widen3(model_path).c_str(), so);
     Ort::AllocatorWithDefaultOptions alloc;
-    auto i0 = session_->GetInputNameAllocated(0, alloc);
-    auto i1 = session_->GetInputNameAllocated(1, alloc);
+    size_t n_in = session_->GetInputCount();
+    for (size_t i = 0; i < n_in; i++) {
+        auto name = session_->GetInputNameAllocated(i, alloc);
+        std::string n = name.get();
+        if (n == "feats") in_feats_ = n;
+        else if (n == "emb") in_emb_ = n;
+        else if (n == "enroll_tokens") { in_tokens_ = n; use_tokens_ = true; }
+        else if (n == "enroll_mask") in_mask_ = n;
+        else if (in_feats_.empty()) in_feats_ = n;
+        else if (in_emb_.empty()) in_emb_ = n;
+    }
     auto o0 = session_->GetOutputNameAllocated(0, alloc);
-    in_feats_ = i0.get();
-    in_emb_ = i1.get();
     out_logits_ = o0.get();
-    // 按名字对齐（不依赖顺序）
-    if (in_feats_ == "emb") std::swap(in_feats_, in_emb_);
+    if (in_feats_.empty()) throw std::runtime_error("pvad: no feats input found");
 }
 
 Pvad::~Pvad() = default;
 
-std::vector<float> Pvad::target_probs(const float* feats, int T, const float* emb) {
+std::vector<float> Pvad::target_probs(const float* feats, int T, const float* emb,
+                                      const std::vector<std::vector<float>>* tokens) {
     Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     int64_t fshape[3] = {1, T, 80};
-    int64_t eshape[2] = {1, 192};
     Ort::Value t_feats = Ort::Value::CreateTensor<float>(mem, const_cast<float*>(feats), (size_t)T * 80, fshape, 3);
-    Ort::Value t_emb = Ort::Value::CreateTensor<float>(mem, const_cast<float*>(emb), 192, eshape, 2);
-    const char* in_names[2] = {in_feats_.c_str(), in_emb_.c_str()};
-    const char* out_names[1] = {out_logits_.c_str()};
-    Ort::Value inputs[2] = {std::move(t_feats), std::move(t_emb)};
-    auto outputs = session_->Run(Ort::RunOptions{nullptr}, in_names, inputs, 2, out_names, 1);
+
+    auto run = [&](std::vector<Ort::Value>& inputs, std::vector<const char*>& names) {
+        const char* out_names[1] = {out_logits_.c_str()};
+        return session_->Run(Ort::RunOptions{nullptr}, names.data(), inputs.data(), inputs.size(), out_names, 1);
+    };
+
+    std::vector<Ort::Value> outputs;
+    if (!use_tokens_) {
+        int64_t eshape[2] = {1, 192};
+        Ort::Value t_emb = Ort::Value::CreateTensor<float>(mem, const_cast<float*>(emb), 192, eshape, 2);
+        std::vector<Ort::Value> inputs;
+        inputs.push_back(std::move(t_feats));
+        inputs.push_back(std::move(t_emb));
+        std::vector<const char*> names = {in_feats_.c_str(), in_emb_.c_str()};
+        outputs = run(inputs, names);
+    } else {
+        // v5: enroll_tokens [1,N,192] + enroll_mask [1,N]（True=padding；全 False = 无 padding）
+        std::vector<float> flat;
+        size_t N = tokens && !tokens->empty() ? tokens->size() : 1;
+        flat.reserve(N * 192);
+        if (tokens && !tokens->empty()) {
+            for (auto& t : *tokens) flat.insert(flat.end(), t.begin(), t.end());
+        } else {
+            flat.insert(flat.end(), emb, emb + 192);  // 回退：质心作单 token
+        }
+        int64_t tshape[3] = {1, (int64_t)N, 192};
+        int64_t mshape[2] = {1, (int64_t)N};
+        auto mask = std::make_unique<bool[]>(N);  // vector<bool>::data() 被删除，用数组
+        std::fill(mask.get(), mask.get() + N, false);
+        Ort::Value t_tokens = Ort::Value::CreateTensor<float>(mem, flat.data(), flat.size(), tshape, 3);
+        Ort::Value t_mask = Ort::Value::CreateTensor<bool>(mem, mask.get(), N, mshape, 2);
+        std::vector<Ort::Value> inputs;
+        inputs.push_back(std::move(t_feats));
+        inputs.push_back(std::move(t_tokens));
+        inputs.push_back(std::move(t_mask));
+        std::vector<const char*> names = {in_feats_.c_str(), in_tokens_.c_str(), in_mask_.c_str()};
+        outputs = run(inputs, names);
+    }
 
     auto shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();  // [1, T', 3]
     int Tout = (int)shape[1];

@@ -82,14 +82,100 @@ class PvadModelAttn(nn.Module):
         return self.fc(out)
 
 
-MODELS = {"concat": PvadModel, "film": PvadModelFiLM, "attn": PvadModelAttn}
+class CrossAttn(nn.Module):
+    """手写 2 头交叉注意力 (ONNX 17 友好; nn.MultiheadAttention 导出版本转换有坑)。"""
+
+    def __init__(self, d_model=128, emb_dim=EMB_DIM, heads=2):
+        super().__init__()
+        self.heads = heads
+        self.d_head = d_model // heads
+        self.q = nn.Linear(d_model, d_model)
+        self.k = nn.Linear(emb_dim, d_model)
+        self.v = nn.Linear(emb_dim, d_model)
+        self.o = nn.Linear(d_model, d_model)
+
+    def forward(self, q_in, kv, kv_mask=None):
+        B, T, _ = q_in.shape
+        N = kv.shape[1]
+        H, dh = self.heads, self.d_head
+        q = self.q(q_in).view(B, T, H, dh).transpose(1, 2)   # [B,H,T,dh]
+        k = self.k(kv).view(B, N, H, dh).transpose(1, 2)     # [B,H,N,dh]
+        v = self.v(kv).view(B, N, H, dh).transpose(1, 2)
+        scores = q @ k.transpose(-1, -2) / float(dh) ** 0.5  # [B,H,T,N]
+        if kv_mask is not None:
+            scores = scores.masked_fill(kv_mask[:, None, None, :], -1e9)
+        a = torch.softmax(scores, dim=-1) @ v                # [B,H,T,dh]
+        a = a.transpose(1, 2).reshape(B, T, H * dh)
+        return self.o(a), scores
+
+
+class PvadModelAttnV5(nn.Module):
+    """v5 纯交叉注意力: enrollment 多帧 tokens 作 KV, 帧特征作 query (cond="attn5")。"""
+
+    USE_TOKENS = True
+
+    def __init__(self, feat_dim=FEAT_DIM, emb_dim=EMB_DIM, hidden=128, heads=2):
+        super().__init__()
+        self.in_proj = nn.Linear(feat_dim, hidden)
+        self.attn = CrossAttn(hidden, emb_dim, heads)
+        self.gru = nn.GRU(hidden, hidden, num_layers=2, batch_first=True)
+        self.fc = nn.Linear(hidden, NUM_CLASSES)
+
+    def forward(self, feats, tokens, kv_mask=None):
+        q = self.in_proj(feats)
+        a, _ = self.attn(q, tokens, kv_mask)
+        h = q + a
+        out, _ = self.gru(h)
+        return self.fc(out)
+
+
+class PvadModelFilmAttnV5(nn.Module):
+    """v5 注意力+FiLM: 交叉注意力残差融合 + FiLM 逐层调制 (cond="film_attn")。
+    保留 v4 的 gru1/gru2 结构, 便于从 v4 checkpoint 初始化。"""
+
+    USE_TOKENS = True
+
+    def __init__(self, feat_dim=FEAT_DIM, emb_dim=EMB_DIM, hidden=128, heads=2):
+        super().__init__()
+        self.in_proj = nn.Linear(feat_dim, hidden)
+        self.attn = CrossAttn(hidden, emb_dim, heads)
+        self.film_in = nn.Linear(emb_dim, 2 * hidden)
+        self.gru1 = nn.GRU(hidden, hidden, batch_first=True)
+        self.film_h = nn.Linear(emb_dim, 2 * hidden)
+        self.gru2 = nn.GRU(hidden, hidden, batch_first=True)
+        self.fc = nn.Linear(hidden, NUM_CLASSES)
+
+    def forward(self, feats, tokens, kv_mask=None):
+        q = self.in_proj(feats)
+        a, _ = self.attn(q, tokens, kv_mask)
+        h = q + a
+        if kv_mask is not None:
+            keep = (~kv_mask).float().unsqueeze(-1)
+            pooled = (tokens * keep).sum(1) / keep.sum(1).clamp(min=1.0)
+        else:
+            pooled = tokens.mean(1)
+        gb1 = self.film_in(pooled).unsqueeze(1)
+        hd = h.shape[-1]
+        h = h * (1.0 + gb1[..., :hd]) + gb1[..., hd:]
+        h, _ = self.gru1(h)
+        gb2 = self.film_h(pooled).unsqueeze(1)
+        h = h * (1.0 + gb2[..., :hd]) + gb2[..., hd:]
+        h, _ = self.gru2(h)
+        return self.fc(h)
+
+
+MODELS = {"concat": PvadModel, "film": PvadModelFiLM, "attn": PvadModelAttn,
+          "attn5": PvadModelAttnV5, "film_attn": PvadModelFilmAttnV5}
 
 
 class MixtureDataset(Dataset):
-    def __init__(self, mix_dir, max_n=None, feats_subdir="feats"):
+    def __init__(self, mix_dir, max_n=None, feats_subdir="feats", use_tokens=False):
         d = Path(mix_dir)
         self.dir = d
         self.feat_dir = d / feats_subdir
+        self.use_tokens = use_tokens
+        emb_dir = "emb_tokens" if use_tokens else "emb"
+        self.emb_dir = d / emb_dir
         self.recs = load_labels(d / "labels.jsonl")
         if max_n:
             import random
@@ -98,7 +184,7 @@ class MixtureDataset(Dataset):
         # 过滤缺失特征
         self.recs = [r for r in self.recs
                      if (self.feat_dir / f"{r['id']}.npy").exists()
-                     and (d / "emb" / f"{r['id']}.npy").exists()]
+                     and (self.emb_dir / f"{r['id']}.npy").exists()]
 
     def __len__(self):
         return len(self.recs)
@@ -106,7 +192,7 @@ class MixtureDataset(Dataset):
     def __getitem__(self, i):
         r = self.recs[i]
         feats = np.load(self.feat_dir / f"{r['id']}.npy")
-        emb = np.load(self.dir / "emb" / f"{r['id']}.npy")
+        emb = np.load(self.emb_dir / f"{r['id']}.npy")
         labels = np.asarray(r["labels"], dtype=np.int64)
         T = min(len(feats), len(labels))
         return feats[:T], emb, labels[:T], r["snr_db"]
@@ -117,14 +203,26 @@ def collate(batch):
     B = len(batch)
     T = max(f.shape[0] for f in feats)
     x = torch.zeros(B, T, FEAT_DIM)
-    e = torch.zeros(B, EMB_DIM)
     y = torch.full((B, T), -100, dtype=torch.long)
+    use_tokens = embs[0].ndim == 2
+    if use_tokens:
+        N = max(e.shape[0] for e in embs)
+        e = torch.zeros(B, N, EMB_DIM)
+        kv_mask = torch.ones(B, N, dtype=torch.bool)  # True = pad
+    else:
+        e = torch.zeros(B, EMB_DIM)
+        kv_mask = None
     for i, (f, em, l) in enumerate(zip(feats, embs, labels)):
         t = f.shape[0]
         x[i, :t] = torch.from_numpy(f)
-        e[i] = torch.from_numpy(em)
         y[i, :t] = torch.from_numpy(l)
-    return x, e, y
+        if use_tokens:
+            n = em.shape[0]
+            e[i, :n] = torch.from_numpy(em)
+            kv_mask[i, :n] = False
+        else:
+            e[i] = torch.from_numpy(em)
+    return x, e, kv_mask, y
 
 
 @torch.no_grad()
@@ -136,8 +234,9 @@ def evaluate(model, loader, class_weight):
     far_n = far_d = 0       # true 1 -> pred 2
     correct = 0
     crit = nn.CrossEntropyLoss(weight=class_weight, ignore_index=-100, reduction="sum")
-    for x, e, y in loader:
-        logits = model(x, e)
+    use_tokens = getattr(model, "USE_TOKENS", False)
+    for x, e, kv_mask, y in loader:
+        logits = model(x, e, kv_mask) if use_tokens else model(x, e)
         tot_loss += crit(logits.reshape(-1, NUM_CLASSES), y.reshape(-1)).item()
         mask = y != -100
         pred = logits.argmax(-1)
@@ -177,8 +276,8 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--ckpt-name", default="best.pt")
     ap.add_argument("--log-name", default="train_log.json")
-    ap.add_argument("--cond", choices=["concat", "film", "attn"], default="concat",
-                    help="enrollment 条件机制")
+    ap.add_argument("--cond", choices=["concat", "film", "attn", "attn5", "film_attn"],
+                    default="concat", help="enrollment 条件机制")
     ap.add_argument("--save-all-epochs", action="store_true",
                     help="每个 epoch 都保存 checkpoint (<ckpt-stem>_epNN.pt), "
                          "供 F1-lambda*FAR 等准则事后选模")
@@ -192,9 +291,11 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    use_tokens = getattr(MODELS[args.cond], "USE_TOKENS", False)
     train_ds = MixtureDataset(args.train_dir, args.max_train or None,
-                              feats_subdir=args.feats_subdir)
-    val_ds = MixtureDataset(args.val_dir, feats_subdir=args.feats_subdir)
+                              feats_subdir=args.feats_subdir, use_tokens=use_tokens)
+    val_ds = MixtureDataset(args.val_dir, feats_subdir=args.feats_subdir,
+                            use_tokens=use_tokens)
     print(f"train {len(train_ds)} 条, val {len(val_ds)} 条")
     train_ld = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
                           collate_fn=collate, num_workers=args.workers,
@@ -205,8 +306,20 @@ def main():
     model = MODELS[args.cond]().to(DEVICE)
     if args.init_from:
         _st = torch.load(args.init_from, map_location="cpu", weights_only=False)
-        model.load_state_dict(_st["model"])
-        print(f"初始化自 {args.init_from} (ep{_st.get('epoch')})")
+        sd = _st["model"]
+        if args.cond == "attn5":
+            # v4 的 gru1/gru2 (各 1 层) 重映射到单个 2 层 GRU
+            sd = {("gru." + k[5:-2] + "_l" + ("0" if k.startswith("gru1") else "1")
+                   if (k.startswith("gru1.") or k.startswith("gru2.")) and k.endswith("l0")
+                   else k): v for k, v in sd.items()}
+        # 只保留键名和形状都匹配的 (其余随机初始化)
+        ref = model.state_dict()
+        sd = {k: v for k, v in sd.items()
+              if k in ref and ref[k].shape == v.shape}
+        missing = [k for k in ref if k not in sd]
+        model.load_state_dict(sd, strict=False)
+        print(f"初始化自 {args.init_from} (ep{_st.get('epoch')}), "
+              f"匹配 {len(sd)} 键, 随机初始化 {len(missing)} 键")
     n_params = sum(p.numel() for p in model.parameters())
     print(f"模型参数量: {n_params:,}")
     class_weight = torch.tensor([1.0, args.weight1, args.target_weight])
@@ -219,8 +332,8 @@ def main():
         model.train()
         t0 = time.time()
         tot, n = 0.0, 0
-        for x, e, y in train_ld:
-            logits = model(x, e)
+        for x, e, kv_mask, y in train_ld:
+            logits = model(x, e, kv_mask) if use_tokens else model(x, e)
             loss = crit(logits.reshape(-1, NUM_CLASSES), y.reshape(-1))
             opt.zero_grad()
             loss.backward()

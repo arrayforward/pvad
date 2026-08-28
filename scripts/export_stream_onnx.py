@@ -48,6 +48,36 @@ class StreamWrapper(torch.nn.Module):
         return self.fc(h), torch.cat([h1, h2], dim=0)
 
 
+class StreamWrapperV5(torch.nn.Module):
+    """v5 film_attn 的 state 外置封装:
+    (feats_chunk, tokens, kv_mask, h0) -> (logits, hN)。"""
+
+    def __init__(self, model):
+        super().__init__()
+        self.in_proj = model.in_proj
+        self.attn = model.attn
+        self.film_in = model.film_in
+        self.gru1 = model.gru1
+        self.film_h = model.film_h
+        self.gru2 = model.gru2
+        self.fc = model.fc
+
+    def forward(self, feats_chunk, tokens, kv_mask, h0):
+        q = self.in_proj(feats_chunk)
+        a, _ = self.attn(q, tokens, kv_mask)
+        h = q + a
+        keep = (~kv_mask).float().unsqueeze(-1)
+        pooled = (tokens * keep).sum(1) / keep.sum(1).clamp(min=1.0)
+        hd = h.shape[-1]
+        gb1 = self.film_in(pooled).unsqueeze(1)
+        h = h * (1.0 + gb1[..., :hd]) + gb1[..., hd:]
+        h, h1 = self.gru1(h, h0[0:1])
+        gb2 = self.film_h(pooled).unsqueeze(1)
+        h = h * (1.0 + gb2[..., :hd]) + gb2[..., hd:]
+        h, h2 = self.gru2(h, h0[1:2])
+        return self.fc(h), torch.cat([h1, h2], dim=0)
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -57,49 +87,75 @@ def main():
 
     state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     cond = state.get("cond", "concat")
-    assert cond == "film", f"流式导出仅支持 film 架构, 当前 {cond}"
+    assert cond in ("film", "film_attn"), f"流式导出仅支持 film/film_attn, 当前 {cond}"
     model = MODELS[cond]()
     model.load_state_dict(state["model"])
     model.eval()
-    wrapped = StreamWrapper(model)
+    v5 = cond == "film_attn"
+    wrapped = StreamWrapperV5(model) if v5 else StreamWrapper(model)
     wrapped.eval()
     print(f"ckpt ep{state.get('epoch')}, params={state.get('n_params'):,}")
 
     out = Path(args.out)
     B, T = 2, 5
     feats = torch.randn(B, T, FEAT_DIM)
-    emb = torch.randn(B, EMB_DIM)
     h0 = torch.zeros(2, B, HIDDEN)
-    torch.onnx.export(
-        wrapped, (feats, emb, h0), str(out),
-        input_names=["feats_chunk", "emb", "h0"], output_names=["logits", "hN"],
-        dynamic_axes={"feats_chunk": {0: "batch", 1: "time"},
-                      "emb": {0: "batch"}, "h0": {1: "batch"},
-                      "logits": {0: "batch", 1: "time"}, "hN": {1: "batch"}},
-        opset_version=17)
+    if v5:
+        from torch.export import Dim
+        N = 6
+        toks = torch.randn(B, N, EMB_DIM)
+        kv_mask = torch.zeros(B, N, dtype=torch.bool)
+        ds = {"feats_chunk": {0: Dim("batch"), 1: Dim("time")},
+              "tokens": {0: Dim("batch"), 1: Dim("n_tok")},
+              "kv_mask": {0: Dim("batch"), 1: Dim("n_tok")},
+              "h0": {1: Dim("batch")}}
+        torch.onnx.export(
+            wrapped, (feats, toks, kv_mask, h0), str(out),
+            input_names=["feats_chunk", "enroll_tokens", "enroll_mask", "h0"],
+            output_names=["logits", "hN"],
+            dynamic_shapes=ds, opset_version=17)
+    else:
+        emb = torch.randn(B, EMB_DIM)
+        torch.onnx.export(
+            wrapped, (feats, emb, h0), str(out),
+            input_names=["feats_chunk", "emb", "h0"], output_names=["logits", "hN"],
+            dynamic_axes={"feats_chunk": {0: "batch", 1: "time"},
+                          "emb": {0: "batch"}, "h0": {1: "batch"},
+                          "logits": {0: "batch", 1: "time"}, "hN": {1: "batch"}},
+            opset_version=17)
     print(f"导出 {out}")
 
-    # ---- 对齐验证: 整段一次性 vs chunk=1/5/50 分段 ----
+    # ---- 对齐验证: torch 整段 vs chunk=1/5/50 分段 (同一权重) ----
     import onnxruntime as ort
-    sess_full = ort.InferenceSession(str(ROOT / "models" / "pvad" / "pvad_v4.onnx"),
-                                     providers=["CPUExecutionProvider"])
     sess_stream = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
     rng = np.random.default_rng(0)
     x = rng.standard_normal((1, 137, FEAT_DIM)).astype(np.float32)
-    e = rng.standard_normal((1, EMB_DIM)).astype(np.float32)
-    ref = sess_full.run(None, {"feats": x, "emb": e})[0]
+    with torch.no_grad():
+        if v5:
+            e_np = rng.standard_normal((1, 6, EMB_DIM)).astype(np.float32)
+            m_np = np.zeros((1, 6), dtype=bool)
+            ref = model(torch.from_numpy(x), torch.from_numpy(e_np),
+                        torch.from_numpy(m_np)).numpy()
+        else:
+            e_np = rng.standard_normal((1, EMB_DIM)).astype(np.float32)
+            ref = model(torch.from_numpy(x), torch.from_numpy(e_np)).numpy()
     worst = 0.0
     for chunk in (1, 5, 50):
         h = np.zeros((2, 1, HIDDEN), dtype=np.float32)
         outs = []
         for s in range(0, x.shape[1], chunk):
-            lg, h = sess_stream.run(
-                None, {"feats_chunk": x[:, s:s + chunk], "emb": e, "h0": h})
+            if v5:
+                lg, h = sess_stream.run(
+                    None, {"feats_chunk": x[:, s:s + chunk],
+                           "enroll_tokens": e_np, "enroll_mask": m_np, "h0": h})
+            else:
+                lg, h = sess_stream.run(
+                    None, {"feats_chunk": x[:, s:s + chunk], "emb": e_np, "h0": h})
             outs.append(lg)
         got = np.concatenate(outs, axis=1)
         d = float(np.abs(ref - got).max())
         worst = max(worst, d)
-        print(f"chunk={chunk:>2}: 与整段 ONNX 最大误差 {d:.2e}")
+        print(f"chunk={chunk:>2}: 与 torch 整段最大误差 {d:.2e}")
     ok = worst < 1e-5
     print(f"总体 {'OK' if ok else 'MISMATCH'} (<1e-5)")
     return 0 if ok else 1

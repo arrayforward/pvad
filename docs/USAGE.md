@@ -43,7 +43,10 @@ tar xjf /tmp/sherpa.tar.bz2 && mv sherpa-onnx-v1.13.6-win-x64-shared-MD-Release 
 | `models/pvad/pvad.onnx(+ .data)` | ~1MB | PVAD v1（emb 拼接条件） |
 | `models/pvad/pvad_v2.onnx(+ .data)` | ~1MB | PVAD v2（同 v1 架构，增广数据） |
 | `models/pvad/pvad_v3.onnx(+ .data)` | ~1MB | PVAD v3（FiLM 条件） |
-| `models/pvad/pvad_v4.onnx(+ .data)` | ~1MB | PVAD v4（FiLM 条件，**默认**：双条件双优，C++ 干净回归 97.5%） |
+| `models/pvad/pvad_v4.onnx(+ .data)` | ~1MB | PVAD v4（FiLM 条件） |
+| `models/pvad/pvad_v5.onnx(+ .data)` | ~1MB | PVAD v5（多帧 tokens+交叉注意力，**离线默认**：增广历代最佳） |
+| `models/pvad/pvad_v4_stream.onnx(+ .data)` | ~1MB | PVAD v4 流式（GRU state 外置，**实时默认**） |
+| `models/pvad/pvad_v5_stream.onnx(+ .data)` | ~1MB | PVAD v5 流式（**不达标禁用**，增广 −17pp） |
 | `models/pvad/best*.pt` | 各 ~1MB | 训练 checkpoint（fine-tune 入口，TRAINING.md 复现用） |
 
 `.onnx.data` 是外部权重文件，必须与同名 `.onnx` 放在同一目录，不要单独移动/改名。
@@ -239,13 +242,15 @@ windeployqt 自动拷贝；sherpa/onnxruntime DLL 一并拷贝（onnxruntime.dll
 
 ### 4.4 模型版本切换
 
-- CLI：`--pvad-model models/pvad/pvad_v4.onnx`（各版接口相同：`feats[B,T,80]+emb[B,192]→logits[B,T,3]`；
-  **默认已是 v4**，此参数仅用于切旧版对比）
-- qt_demo：默认编译期写死 `models/pvad/pvad_v4.onnx`（`engine.cpp` 的 `init()`），改路径重编译即可
-- **当前默认 v4 的理由**：python 口径干净 94.0%/增广 83.0% 双优（v3 为 92.4%/78.2%），
-  C++ 口径干净回归 97.5%（v3 为 95.5%，误打断 4.0%→1.5%）
-- 历史版本选择参考 [TRAINING.md](../TRAINING.md) 第 5 节（v2 在强噪声/混响下曾是首选，
-  v4 增广 83.0% 已超过 v2 的 81.8%）
+- CLI 离线：`--pvad-model models/pvad/pvad_v5.onnx`（**默认已是 v5**；v1-v4 单向量接口与
+  v5 tokens 接口自动检测适配，模板用 v4 格式含 tokens）
+- CLI 实时 / qt_demo 麦克风：`pvad_v4_stream.onnx`（**不要用 pvad_v5_stream.onnx**——
+  v5 流式版增广条件 −17pp 不达标，见 models/pvad/pvad_v5_stream.md 的如实记录；
+  这就是"离线 v5 / 实时 v4_stream"双模型部署的原因）
+- qt_demo 离线：默认编译期写死 `models/pvad/pvad_v5.onnx`（`engine.cpp` 的 `init()`）
+- **离线默认 v5 的理由**：增广 89.4%/误打断 10.0% 历代最佳（v4 为 83.0%/16.4%），
+  干净与 v4 持平（93.0% vs 94.0%，−1.0pp 验收线内）
+- 历史版本选择参考 [TRAINING.md](../TRAINING.md) 第 5 节
 
 ---
 

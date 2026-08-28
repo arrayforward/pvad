@@ -49,7 +49,7 @@ void Engine::init() {
     QString err;
     std::string e;
     models_ok_ = core_.init((root + "/models/campplus.onnx").toStdString(),
-                            (root + "/models/pvad/pvad_v4.onnx").toStdString(), e);
+                            (root + "/models/pvad/pvad_v5.onnx").toStdString(), e);
     if (!models_ok_) {
         emit logLine("模型加载失败: " + QString::fromStdString(e));
         return;
@@ -65,6 +65,12 @@ void Engine::init() {
         if (EnrollStore::load(dir.toStdString(), segs, fm, loaded, le)) {
             if (loaded) {
                 core_.set_segments(segs);
+                // 旧格式（无 tokens）从 wav 重算升级；wav 被删则降级告警（v5 回退单 token）
+                int tok_failed = core_.rebuild_missing_tokens(
+                    qEnvironmentVariable("DEMO_ROOT", DEMO_ROOT).toStdString() + "/qt_demo");
+                if (tok_failed > 0)
+                    emit logLine(QString("警告：%1 段注册缺少 tokens 且无法从 wav 重算"
+                                         "（录音已删？），v5 将回退单 token 质心").arg(tok_failed));
                 if (!fm.empty()) {
                     std::vector<double> s(80);
                     for (int b = 0; b < 80; b++) s[b] = (double)fm[b] * 1000.0;

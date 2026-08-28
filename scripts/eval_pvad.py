@@ -40,14 +40,15 @@ def snr_bucket(snr):
 
 @torch.no_grad()
 def frame_metrics(model, test_dir):
-    ds = MixtureDataset(test_dir)
+    use_tokens = getattr(model, "USE_TOKENS", False)
+    ds = MixtureDataset(test_dir, use_tokens=use_tokens)
     ld = DataLoader(ds, batch_size=32, shuffle=False, collate_fn=collate,
                     num_workers=0)
     # 按 SNR 分档统计: bucket -> [tp, fp, fn, far_n, far_d, correct, total]
     buckets = {}
     i = 0
-    for x, e, y in ld:
-        logits = model(x, e)
+    for x, e, kv_mask, y in ld:
+        logits = model(x, e, kv_mask) if use_tokens else model(x, e)
         pred = logits.argmax(-1)
         B = x.shape[0]
         for b in range(B):
@@ -167,9 +168,16 @@ def e2e(args, model=None):
 
         # ---- PVAD 门控 ----
         feats_t = torch.from_numpy(feats[:T]).unsqueeze(0)
-        emb_t = torch.from_numpy(emb).unsqueeze(0)
-        with torch.no_grad():
-            p2 = torch.softmax(model(feats_t, emb_t), -1)[0, :, 2].numpy()
+        if getattr(model, "USE_TOKENS", False):
+            toks = np.load(Path(args.test_dir) / "emb_tokens" / f"{r['id']}.npy")
+            emb_t = torch.from_numpy(toks).unsqueeze(0)
+            kv_mask = torch.zeros(1, len(toks), dtype=torch.bool)
+            with torch.no_grad():
+                p2 = torch.softmax(model(feats_t, emb_t, kv_mask), -1)[0, :, 2].numpy()
+        else:
+            emb_t = torch.from_numpy(emb).unsqueeze(0)
+            with torch.no_grad():
+                p2 = torch.softmax(model(feats_t, emb_t), -1)[0, :, 2].numpy()
         if args.median and args.median > 1:
             from scipy.signal import medfilt
             p2 = medfilt(p2, args.median)

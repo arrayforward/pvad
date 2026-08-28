@@ -37,21 +37,42 @@ def main():
 
     B, T = 2, 137
     feats = torch.randn(B, T, FEAT_DIM)
-    emb = torch.randn(B, EMB_DIM)
-    torch.onnx.export(
-        model, (feats, emb), str(out),
-        input_names=["feats", "emb"], output_names=["logits"],
-        dynamic_axes={"feats": {0: "batch", 1: "time"},
-                      "emb": {0: "batch"},
-                      "logits": {0: "batch", 1: "time"}},
-        opset_version=17)
-    print(f"导出 {out}")
-
-    import onnxruntime as ort
-    sess = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
-    with torch.no_grad():
-        ref = model(feats, emb).numpy()
-    got = sess.run(None, {"feats": feats.numpy(), "emb": emb.numpy()})[0]
+    if getattr(model, "USE_TOKENS", False):
+        from torch.export import Dim
+        N = 5
+        toks = torch.randn(B, N, EMB_DIM)
+        kv_mask = torch.zeros(B, N, dtype=torch.bool)
+        kv_mask[0, N - 1] = True  # 测 mask 路径
+        ds = {"feats": {0: Dim("batch"), 1: Dim("time")},
+              "tokens": {0: Dim("batch"), 1: Dim("n_tok")},
+              "kv_mask": {0: Dim("batch"), 1: Dim("n_tok")}}
+        torch.onnx.export(
+            model, (feats, toks, kv_mask), str(out),
+            input_names=["feats", "enroll_tokens", "enroll_mask"],
+            output_names=["logits"], dynamic_shapes=ds, opset_version=17)
+        print(f"导出 {out}")
+        import onnxruntime as ort
+        sess = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
+        with torch.no_grad():
+            ref = model(feats, toks, kv_mask).numpy()
+        got = sess.run(None, {"feats": feats.numpy(),
+                              "enroll_tokens": toks.numpy(),
+                              "enroll_mask": kv_mask.numpy()})[0]
+    else:
+        emb = torch.randn(B, EMB_DIM)
+        torch.onnx.export(
+            model, (feats, emb), str(out),
+            input_names=["feats", "emb"], output_names=["logits"],
+            dynamic_axes={"feats": {0: "batch", 1: "time"},
+                          "emb": {0: "batch"},
+                          "logits": {0: "batch", 1: "time"}},
+            opset_version=17)
+        print(f"导出 {out}")
+        import onnxruntime as ort
+        sess = ort.InferenceSession(str(out), providers=["CPUExecutionProvider"])
+        with torch.no_grad():
+            ref = model(feats, emb).numpy()
+        got = sess.run(None, {"feats": feats.numpy(), "emb": emb.numpy()})[0]
     diff = np.abs(ref - got).max()
     print(f"onnxruntime vs torch 最大绝对误差: {diff:.2e} "
           f"({'OK' if diff < 1e-4 else 'MISMATCH'})")

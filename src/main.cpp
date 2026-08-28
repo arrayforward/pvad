@@ -32,7 +32,7 @@ struct Args {
     std::string batch_list, batch_out;   // 批量模式：--batch-list 文件列表 -> --batch-out 结果
     std::string vad_model = "models/silero_vad.onnx";
     std::string spk_model = "models/campplus.onnx";
-    std::string pvad_model = "models/pvad/pvad_v4.onnx";
+    std::string pvad_model = "models/pvad/pvad_v5.onnx";
     std::string pvad_stream_model = "models/pvad/pvad_v4_stream.onnx";  // 实时流式专用
     std::string gate_mode = "pvad";   // pvad (默认) | asnorm
     std::string denoise = "rnnoise";  // rnnoise (默认) | off
@@ -203,7 +203,7 @@ struct Pipeline {
         int T = fbank.compute(pcm, n, feats);
         if (T < 4) return;
         mean_normalize(feats, T, 80);
-        p2_pre = pvad->target_probs(feats.data(), T, tpl.pos.data());
+        p2_pre = pvad->target_probs(feats.data(), T, tpl.pos.data(), &tpl.tokens);
     }
 
     // PVAD 门控: 取当前帧的 P(target) 过迟滞门控。
@@ -223,7 +223,7 @@ struct Pipeline {
             if (T < 4) return;
             mean_normalize(feats, T, 80);
             try {
-                auto p2 = pvad->target_probs(feats.data(), T, tpl.pos.data());
+                auto p2 = pvad->target_probs(feats.data(), T, tpl.pos.data(), &tpl.tokens);
                 p = p2.back();
             } catch (...) { return; }
         }
@@ -393,7 +393,7 @@ int run_bench_stream(const Args& a) {
                 std::vector<float> feats;
                 int T = fbank.compute(seg.data(), (int)seg.size(), feats);
                 mean_normalize(feats, T, 80);
-                pvad.target_probs(feats.data(), T, tpl.pos.data());
+                pvad.target_probs(feats.data(), T, tpl.pos.data(), &tpl.tokens);
             }
             auto t0 = std::chrono::steady_clock::now();
             const int N = 20;
@@ -401,7 +401,7 @@ int run_bench_stream(const Args& a) {
                 std::vector<float> feats;
                 int T = fbank.compute(seg.data(), (int)seg.size(), feats);
                 mean_normalize(feats, T, 80);
-                pvad.target_probs(feats.data(), T, tpl.pos.data());
+                pvad.target_probs(feats.data(), T, tpl.pos.data(), &tpl.tokens);
             }
             auto t1 = std::chrono::steady_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / N;
@@ -597,7 +597,7 @@ int run_batch(const Args& a) {
         std::vector<float> p2;
         if (T >= 4) {
             mean_normalize(feats, T, 80);
-            p2 = pvad.target_probs(feats.data(), T, tpl.pos.data());
+            p2 = pvad.target_probs(feats.data(), T, tpl.pos.data(), &tpl.tokens);
         }
 
         // 逐帧门控（与 run_offline pvad 路径一致：frame>=4 起评分，VAD speech-end 复位）

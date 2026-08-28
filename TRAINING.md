@@ -365,3 +365,61 @@ EMA 时间常数 50 帧（0.5s）。微调后模型对早期未收敛统计鲁�
 交付：`models/pvad/pvad_v4_stream.onnx` + `pvad_v4_stream.md`（接口与 CMVN 约定）、
 `scripts/export_stream_onnx.py`、`scripts/eval_stream.py`（CMVN 分析 + 流式 e2e）、
 `models/pvad/best_v4s.pt`（EMA 微调 checkpoint）+ `train_log_v4s.json`。
+
+---
+
+## 11. v5（2026-08-28）：enrollment 多帧表示 + 真交叉注意力
+
+### 动机与架构
+v4 分析过"单向量作单 token KV 的注意力数学退化"。v5 把 enrollment 按 1s 切子段
+（整 1s 切分、尾段丢弃，N=3-10），每段过 CAM++ → tokens [N,192]
+（`precompute_features.py --tokens` → `emb_tokens/`）。帧特征投影 (80→128) 作 query、
+tokens 作 K/V 的**手写 2 头交叉注意力**（`CrossAttn`，残差融合）进 GRU。
+消融两版：纯注意力 `attn5`（291,331 参数）、注意力+FiLM `film_attn`（390,147 参数，
+FiLM 用 mask 均值池化 tokens，保留 v4 的 gru1/gru2 结构便于初始化）。
+ONNX 导出注意：nn.MultiheadAttention 和 .chunk() 在 opset 17 版本转换下都有坑
+（Split num_outputs），需手写注意力 + 切片（教训同 v3）。
+
+### 训练与选模
+数据复用 mixtures_v4 分布，两版均从 best_v4.pt 初始化 GRU/输出层（attn5 需
+gru1/gru2→单层 GRU 键重映射；形状不匹配的键随机初始化），12000 条 × 10 epoch
+（~7-9min/epoch），权重 [1,2,3]，每 epoch 存 ckpt，**val e2e 选模**。
+
+### 消融结果（val e2e → test e2e）
+
+| 版本 | val e2e 最优 | test 干净 | test 增广 |
+|---|---|---|---|
+| film_attn ep08 | **89.6%**（误 9.0%） | **93.0%**（误 5.6%） | **89.4%**（误 10.0%） |
+| attn5 ep10 | 83.6%（误 16.2%） | 89.2%（误 10.4%） | 80.0%（误 19.6%） |
+
+**注意力+FiLM 显著优于纯注意力**；纯注意力甚至不如 v4 的纯 FiLM。
+
+### v1/v3/v4/v5 对比（test e2e，各 500 条，同口径）
+
+| 条件 | v1 | v3 | v4 | v5(film_attn) |
+|---|---|---|---|---|
+| 干净正确率 | 90.6% | 92.4% | 94.0% | **93.0%**（误 5.6%） |
+| 增广正确率 | 72.4% | 78.2% | 83.0% | **89.4%**（误 **10.0%**） |
+
+### 验收：**达标**
+- 增广 89.4% ≥ 84% ✓（主攻目标：误打断 16.4%→10.0%，-6.4pp）
+- 干净 93.0% ≥ 93% ✓（踩线，未超 v4 的 94.0% 但在 -1pp 允许带内）
+
+### 注意力行为分析（如实）
+抽取注意力权重：max-attn 在目标帧（0.72）与干扰帧（0.64）、负样本（0.58-0.75）
+之间没有清晰分离——**注意力权重不构成可解释的"匹配 enrollment"证据**
+（N 小、softmax 恒集中于某 token）。v5 的收益更可能来自"多帧 enrollment 提供的
+更丰富条件表示"整体（注意力输出 + 池化 FiLM 共同作用），而非可解释的检索式匹配。
+
+### 流式版（pvad_v5_stream.onnx）
+chunk 对齐 5.19e-06 ✓；但 EMA-CMVN 微调（同 v4_stream 流程）后流式 e2e：
+干净 91.5%（-2.0pp 踩线）、**增广 71.0%（-17pp，不达标，误打断 12%→29%）**。
+注意力条件路径对 EMA 统计漂移远比 FiLM 敏感。**实时生产暂留 pvad_v4_stream.onnx**；
+v5 流式需更长 EMA 微调或注意力输入归一化改造（后续工作）。
+
+### 交付
+`models/pvad/pvad_v5.onnx`（parity 5.25e-06）+ `pvad_v5.md`、
+`pvad_v5_stream.onnx` + `pvad_v5_stream.md`（含不达标标注）、
+`best_v5fa.pt`(=ep08)/`best_v5a.pt`(=ep10)/`best_v5s.pt` + 各 train_log、
+`scripts/`（CrossAttn、tokens 预计算、v5 流式 wrapper、eval_stream v5 支持）。
+v1-v4 产物未动。

@@ -59,6 +59,7 @@ static int run_batch(const std::string& jsonl, const std::string& out_dir, int m
             auto emb = spk.embed(wd.samples.data(), (int)wd.samples.size());
             Template tpl;
             tpl.pos = std::move(emb);
+            tpl.tokens = spk.embed_tokens(wd.samples.data(), (int)wd.samples.size());
             save_template(out_dir + "/" + id + ".bin", tpl);
             done++;
         } catch (const std::exception& e) {
@@ -116,6 +117,13 @@ int main(int argc, char** argv) {
         Template tpl;
         printf("positive (speaker A):\n");
         tpl.pos = centroid(spk, pos);
+        // v4：多帧 enrollment tokens（每个正样本 wav 按 1s 切分，尾段丢弃）
+        for (auto& w : pos) {
+            WavData wd = read_wav(w);
+            auto toks = spk.embed_tokens(wd.samples.data(), (int)wd.samples.size());
+            printf("  tokens %s -> N=%zu\n", w.c_str(), toks.size());
+            for (auto& t : toks) tpl.tokens.push_back(std::move(t));
+        }
         if (!neg.empty()) {
             printf("negative (e.g. TTS voice):\n");
             tpl.neg.push_back({"neg", centroid(spk, neg)});
@@ -128,8 +136,8 @@ int main(int argc, char** argv) {
             tpl.cohort.push_back(std::move(emb));  // embed() 已 L2 归一化
         }
         save_template(out, tpl);
-        printf("template saved: %s (v3, dim=%d, neg=%zu, cohort=%zu)\n",
-               out.c_str(), tpl.dim(), tpl.neg.size(), tpl.cohort.size());
+        printf("template saved: %s (v4, dim=%d, neg=%zu, cohort=%zu, tokens=%zu)\n",
+               out.c_str(), tpl.dim(), tpl.neg.size(), tpl.cohort.size(), tpl.tokens.size());
     } catch (const std::exception& e) {
         fprintf(stderr, "error: %s\n", e.what());
         return 1;

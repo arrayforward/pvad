@@ -80,7 +80,7 @@ int run_auto_test(const std::string& root, const std::string& tts_model_dir, boo
     printf("[auto-test] denoise=%s\n", denoise ? "rnnoise" : "off");
 
     DemoCore core;
-    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err)) {
+    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v5.onnx", err)) {
         printf("[auto-test] core init failed: %s\n", err.c_str());
         return 1;
     }
@@ -235,7 +235,7 @@ int run_record_test(const std::string& root, int seconds) {
     // CAM++ 注册
     DemoCore core;
     std::string err;
-    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err)) {
+    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v5.onnx", err)) {
         printf("[record-test] core init failed: %s\n", err.c_str());
         return 1;
     }
@@ -253,7 +253,7 @@ int run_wizard_test(const std::string& root) {
     int fails = 0;
     std::string err;
     DemoCore core;
-    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err)) {
+    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v5.onnx", err)) {
         printf("[wizard-test] core init failed: %s\n", err.c_str());
         return 1;
     }
@@ -347,7 +347,7 @@ int run_persist_test(const std::string& root) {
 
     // 1) 注册 2 段（带元数据）-> 落盘
     DemoCore core;
-    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err)) {
+    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v5.onnx", err)) {
         printf("[persist-test] core init failed: %s\n", err.c_str());
         return 1;
     }
@@ -374,7 +374,7 @@ int run_persist_test(const std::string& root) {
         return 1;
     }
     DemoCore core2;
-    core2.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err);
+    core2.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v5.onnx", err);
     core2.set_segments(segs);
     double max_diff = 0;
     for (size_t i = 0; i < core.centroid().size(); i++)
@@ -414,7 +414,7 @@ int run_persist_test(const std::string& root) {
         std::string e2;
         bool ok = EnrollStore::load(dir2, s2, fm2_, l2, e2);
         DemoCore core3;
-        core3.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v4.onnx", err);
+        core3.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v5.onnx", err);
         core3.set_segments(s2);
         double dot = 0;
         for (size_t i = 0; i < core.centroid().size(); i++)
@@ -440,6 +440,68 @@ int run_persist_test(const std::string& root) {
         printf("PERSIST corrupt-file-degrade: ok=%d loaded=%d err=%.40s -> %s\n", (int)ok,
                (int)l3, e3.c_str(), pass ? "PASS" : "FAIL");
         if (!pass) fails++;
+    }
+
+    // 5) v5 tokens：落盘往返逐位一致 + 旧格式升级（重算/降级）
+    {
+        // 5a) tokens 往返
+        std::vector<SegRecord> segs5;
+        std::vector<float> fm5;
+        bool l5 = false;
+        std::string e5;
+        EnrollStore::load(dir, segs5, fm5, l5, e5);
+        bool tok_ok = l5 && segs5.size() == core.segments().size();
+        if (tok_ok) {
+            for (size_t i = 0; i < segs5.size(); i++) {
+                if (segs5[i].tokens.size() != core.segments()[i].tokens.size()) { tok_ok = false; break; }
+                for (size_t k = 0; k < segs5[i].tokens.size(); k++)
+                    if (segs5[i].tokens[k] != core.segments()[i].tokens[k]) { tok_ok = false; break; }
+            }
+        }
+        printf("PERSIST v5-tokens-roundtrip: ok=%d -> %s\n", (int)tok_ok, tok_ok ? "PASS" : "FAIL");
+        if (!tok_ok) fails++;
+
+        // 5b) 旧格式（无 tokens 字段）+ wav 在（绝对路径真实文件） -> 重算升级
+        std::string dir_old = root + "/build/persist_test/enrollment_oldfmt";
+        std::filesystem::create_directories(dir_old);
+        {
+            const SegRecord& s0 = core.segments()[0];
+            std::string real_wav = root + "/test_audio/voice1b.wav";  // 绝对路径
+            std::string jf = dir_old + "/segments.json";
+            FILE* f = fopen(jf.c_str(), "wb");
+            fprintf(f, "{\"segments\":[\n {\"wav\": \"%s\", \"duration_s\": %.3f, \"time\": \"%s\", \"embedding\": [",
+                    real_wav.c_str(), s0.duration_s, s0.time.c_str());
+            for (size_t j = 0; j < s0.emb.size(); j++)
+                fprintf(f, "%s%.9g", j ? ", " : "", (double)s0.emb[j]);
+            fprintf(f, "]}]}\n");
+            fclose(f);
+        }
+        std::vector<SegRecord> so;
+        std::vector<float> fmo;
+        bool lo = false;
+        std::string eo;
+        EnrollStore::load(dir_old, so, fmo, lo, eo);
+        DemoCore core_old;
+        core_old.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v5.onnx", err);
+        core_old.set_segments(so);
+        int fr = core_old.rebuild_missing_tokens(root + "/qt_demo");
+        bool upg = (fr == 0) && !core_old.all_tokens().empty();
+        printf("PERSIST v5-oldfmt-upgrade: failed=%d tokens=%zu -> %s\n", fr,
+               core_old.all_tokens().size(), upg ? "PASS" : "FAIL");
+        if (!upg) fails++;
+
+        // 5c) 旧格式 + wav 被删 -> 降级（failed>0, tokens 空, 不崩溃）
+        std::vector<SegRecord> sbad(1);
+        sbad[0].wav = "/nonexistent/rec_gone.wav";
+        sbad[0].duration_s = 3.0;
+        sbad[0].time = "2026-08-27 12:00:00";
+        sbad[0].emb = core.segments()[0].emb;
+        core_old.set_segments(sbad);
+        int fr2 = core_old.rebuild_missing_tokens(root + "/qt_demo");
+        bool deg = (fr2 == 1) && core_old.all_tokens().empty();
+        printf("PERSIST v5-upgrade-degrade: failed=%d tokens_empty=%d -> %s\n", fr2,
+               (int)core_old.all_tokens().empty(), deg ? "PASS" : "FAIL");
+        if (!deg) fails++;
     }
 
     printf("[persist-test] %s\n", fails == 0 ? "ALL PASS" : "HAS FAILURES");

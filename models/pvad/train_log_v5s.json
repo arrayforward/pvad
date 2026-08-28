@@ -1,0 +1,67 @@
+{
+ "config": {
+  "train_dir": "data/mixtures_v4/train",
+  "val_dir": "data/mixtures_v4/val",
+  "out_dir": "D:\\ai-app\\double-voice\\models\\pvad",
+  "epochs": 4,
+  "batch": 32,
+  "lr": 0.0001,
+  "target_weight": 3.0,
+  "weight1": 2.0,
+  "max_train": 0,
+  "workers": 4,
+  "ckpt_name": "best_v5s.pt",
+  "log_name": "train_log_v5s.json",
+  "cond": "film_attn",
+  "save_all_epochs": false,
+  "feats_subdir": "feats_ema",
+  "init_from": "models/pvad/best_v5fa.pt"
+ },
+ "n_params": 390147,
+ "epochs": [
+  {
+   "epoch": 1,
+   "train_loss": 0.4261,
+   "elapsed_s": 734.2,
+   "val_loss": 1.1036,
+   "val_acc": 0.77969,
+   "val_target_recall": 0.94322,
+   "val_target_precision": 0.77935,
+   "val_target_f1": 0.85349,
+   "val_far": 0.56466
+  },
+  {
+   "epoch": 2,
+   "train_loss": 0.37023,
+   "elapsed_s": 703.5,
+   "val_loss": 1.04305,
+   "val_acc": 0.79276,
+   "val_target_recall": 0.94871,
+   "val_target_precision": 0.78921,
+   "val_target_f1": 0.86164,
+   "val_far": 0.53432
+  },
+  {
+   "epoch": 3,
+   "train_loss": 0.349,
+   "elapsed_s": 736.1,
+   "val_loss": 0.99923,
+   "val_acc": 0.79956,
+   "val_target_recall": 0.95695,
+   "val_target_precision": 0.7919,
+   "val_target_f1": 0.86663,
+   "val_far": 0.53038
+  },
+  {
+   "epoch": 4,
+   "train_loss": 0.33132,
+   "elapsed_s": 741.8,
+   "val_loss": 0.98469,
+   "val_acc": 0.80027,
+   "val_target_recall": 0.96648,
+   "val_target_precision": 0.78709,
+   "val_target_f1": 0.86761,
+   "val_far": 0.5498
+  }
+ ]
+}
