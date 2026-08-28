@@ -49,6 +49,17 @@ C++ 生产管线口径（`double_voice --batch-list`，RNNoise 默认开，200 �
 v4 帧级（干净/增广）：recall 0.940/0.926，FAR 0.210/0.446。
 完整数据与方法论见 [docs/DESIGN.md](docs/DESIGN.md) 第 6 节。
 
+### 最终部署矩阵
+
+| 场景 | 模型 | 说明（python 口径 干净/增广） |
+|---|---|---|
+| 离线 / 批量回归 | `pvad_v5.onnx` | 多帧 tokens+交叉注意力，93.0% / 89.4%（增广历代最佳） |
+| 实时：强噪 / 混响 | `pvad_v4_stream.onnx` | EMA-CMVN 微调，94.5% / 82.5%（增广鲁棒性最好） |
+| 实时：干净场景（可选） | `pvad_v5s_stream.onnx` | cos 注意力+EMA 微调，92.0% / 85.0%（增广差 2pp 未过线，干净可选） |
+
+一句话指引：**离线永远 v5；实时默认 v4_stream，确认是稳定干净环境再考虑 v5s_stream
+（v5_stream 增广 −17pp 禁用，v6 per-frame CMVN 方向已终止）**。
+
 ## 架构
 
 ```
