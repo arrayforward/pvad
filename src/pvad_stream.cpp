@@ -57,6 +57,15 @@ void PvadStream::reset() {
     probs_.clear();
     prob_next_ = 0;
     out_frame_ = 0;
+    in_frame_ = 0;
+}
+
+void PvadStream::reset_gru() {
+    h_.assign(2 * 128, 0.f);
+    buf_.clear();
+    probs_.clear();
+    prob_next_ = 0;
+    out_frame_ = in_frame_;  // 下一个发出分数对应当前推入帧（EMA 与先验保留）
 }
 
 PvadStream::Out PvadStream::push_frame(const float* fbank80) {
@@ -67,6 +76,7 @@ PvadStream::Out PvadStream::push_frame(const float* fbank80) {
         feat[b] = (float)((double)fbank80[b] - m_[b]);
     }
     buf_.insert(buf_.end(), feat, feat + 80);
+    in_frame_++;
     if ((int)buf_.size() >= chunk_ * 80) run_chunk();
 
     Out o;

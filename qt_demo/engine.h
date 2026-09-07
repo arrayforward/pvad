@@ -15,6 +15,7 @@
 #include "fbank.h"
 #include "pvad_stream.h"
 #include "tts.h"
+#include "vad.h"
 #include "wizard.h"
 #include <miniaudio.h>
 
@@ -104,9 +105,12 @@ private:
     bool interrupt_latched_ = false;      // 本次监听是否已触发过（日志只记首次，之后仍上报数值）
     // 实时流式 PVAD（chunked GRU state 复用 + EMA CMVN），麦克风路径专用
     std::unique_ptr<PvadStream> stream_;
-    PvadGate sgate_{0.5f, 0.2f, 2};
+    std::unique_ptr<Vad> vad_;            // silero VAD（长流会话策略的门控/复位依据）
+    PvadGate sgate_{0.5f, 0.2f, 4};       // confirm=4（压冷启动 blip，长流诊断结论）
     std::deque<float> swin_;              // fbank 对齐窗（480 采样）
     Fbank sfbank_;
+    bool svad_speech_ = false;            // 上一帧 VAD 语音判定
+    int warmup_left_ = 20;                // 会话（分段）起始 warm-up VAD 帧数
     // 背压/节流状态
     size_t drop_acc_ = 0;                 // 自上次日志以来丢弃的采样数
     qint64 last_drop_log_ms_ = 0;

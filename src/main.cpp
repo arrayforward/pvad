@@ -39,6 +39,7 @@ struct Args {
     bool bench_denoise = false;
     bool bench_stream = false;
     bool wav_stream = false;          // 隐藏模式：离线文件走流式路径（正确性验证）
+    bool long_stream_test = false;    // 隐藏模式：90s 剧本长流回归（labels json 判定）
     std::string enroll_wav;           // 可选：流式 CMVN 先验来源（enrollment 音频）
     float pvad_threshold = 0.5f;
     float pvad_hyst = 0.2f;
@@ -50,7 +51,8 @@ struct Args {
     float vad_threshold = 0.5f;
     int confirm = 2;
     int window_ms = 500;
-    int warmup_frames = 50;   // 流式 warm-up（帧），--warmup-frames 可调
+    int warmup_frames = 20;   // 流式 warm-up（VAD 语音帧数），--warmup-frames 可调
+    int stream_confirm = 4;   // 流式门控 confirm（压冷启动 blip），--stream-confirm 可调
     int seconds = 30;
 };
 
@@ -112,7 +114,9 @@ Args parse_args(int argc, char** argv) {
         else if (s == "--vad-threshold") a.vad_threshold = std::stof(next("0.5"));
         else if (s == "--confirm") a.confirm = std::stoi(next("2"));
         else if (s == "--window-ms") a.window_ms = std::stoi(next("500"));
-        else if (s == "--warmup-frames") a.warmup_frames = std::stoi(next("50"));
+        else if (s == "--warmup-frames") a.warmup_frames = std::stoi(next("20"));
+        else if (s == "--stream-confirm") a.stream_confirm = std::stoi(next("4"));
+        else if (s == "--long-stream-test") a.long_stream_test = true;
         else if (s == "--seconds") a.seconds = std::stoi(next("30"));
         else if (s == "--vad-model") a.vad_model = next("");
         else if (s == "--spk-model") a.spk_model = next("");
@@ -281,8 +285,11 @@ int run_offline(const Args& a) {
 }
 
 // ---------------- 实时流式路径（PvadStream：chunked GRU state 复用 + EMA CMVN） ----------------
-// 与整段路径完全不同的推理形态：每 10ms 帧 O(1) 增量计算（单帧 fbank + 5 帧 chunk GRU），
-// 替代旧的"每帧全段重算"（成本随流长超线性增长）。silero VAD speech-end 处重置会话。
+// 长流会话策略（python scripts/longstream_check.py 验证过）：
+//   1) 只在 silero VAD 判语音（p>0.5）的帧上更新门控——MUSAN 噪声段 VAD 恒低，天然免假阳；
+//   2) VAD speech-end 处"会话分段复位"（reset_gru：只清 GRU state，保留 EMA 与先验）——
+//      解除长时间连续非目标语音导致的"全非目标吸收态"（60s+ 后 A 完全漏检的生产 bug）；
+//   3) 复位后 warm-up 20 个 VAD 帧（约 0.3-0.4s）压冷启动尖峰，confirm=4 再压残余 blip。
 struct StreamRunner {
     Vad vad;
     PvadStream stream;
@@ -291,13 +298,17 @@ struct StreamRunner {
     std::deque<float> win;  // 最近 480 采样（fbank 25ms 窗 + 对齐）
     float vad_threshold;
     bool prev_speech = false;
+    int warmup_vad_frames;
+    int warmup_left = 0;
 
     StreamRunner(const Args& a, const std::vector<float>& emb)
         : vad(a.vad_model), stream(a.pvad_stream_model),
-          gate(PvadGate{a.pvad_threshold, a.pvad_hyst, a.confirm}),
-          vad_threshold(a.vad_threshold) {
+          gate(PvadGate{a.pvad_threshold, a.pvad_hyst, a.stream_confirm}),
+          vad_threshold(a.vad_threshold),
+          warmup_vad_frames(a.warmup_frames),
+          warmup_left(a.warmup_frames) {
         stream.set_emb(emb.data());
-        stream.set_warmup((size_t)a.warmup_frames);
+        stream.set_warmup(0);  // warm-up 语义上移到 VAD 帧计数（warmup_left）
         // 可选 CMVN 先验：从 enrollment 音频算 fbank 均值（显著抑制冷启动假阳）
         if (!a.enroll_wav.empty()) {
             WavData ew = read_wav(a.enroll_wav);
@@ -314,33 +325,55 @@ struct StreamRunner {
         }
     }
 
-    // 返回 (分数, 是否触发)；时间戳/帧号一律用 o.frame（分数对应的绝对帧号，
-    // 推理有 0-4 帧滞后，不能用推入帧号当时间戳）
-    std::pair<PvadStream::Out, bool> process(const float* frame160, double t) {
+    void reset_session() {
+        stream.reset();
+        gate.reset();
+        win.clear();
+        warmup_left = warmup_vad_frames;
+        prev_speech = false;
+    }
+
+    // 返回 Step{分数, 本帧是否入门控, 是否触发}；时间戳/帧号一律用 o.frame
+    // （分数对应的绝对帧号，推理有 0-4 帧滞后，不能用推入帧号当时间戳）
+    struct Step {
+        PvadStream::Out o;
+        bool scored = false;  // 本帧是否进入门控（VAD 语音帧且 warm-up 完成）
+        bool fire = false;
+    };
+    Step process(const float* frame160, double t) {
         float vp = vad.process(frame160, 160);
-        if (vp >= 0.f) {
-            bool sp = vp > vad_threshold;
-            if (sp != prev_speech) {
-                printf("[t=%6.2f] VAD %s (p=%.3f)\n", t, sp ? "speech start" : "speech end  ", vp);
-                // 注意：speech-end 只复位门控计数，不重置 GRU/EMA——
-                // python 评估是整流单会话；中途重置会产生二次冷启动假阳（实测 voice1b
-                // 在 t≈1.0 的误触发即来源于此）
-                if (prev_speech && !sp) gate.reset();
-                prev_speech = sp;
+        bool sp = vp >= 0.f && vp > vad_threshold;
+        if (vp >= 0.f && sp != prev_speech) {
+            printf("[t=%6.2f] VAD %s (p=%.3f)\n", t, sp ? "speech start" : "speech end  ", vp);
+            if (prev_speech && !sp) {
+                // 会话分段复位：只清 GRU state（EMA/先验保留，避免 CMVN 冷启动）
+                stream.reset_gru();
+                gate.reset();
+                warmup_left = warmup_vad_frames;
             }
+            prev_speech = sp;
         }
         for (int i = 0; i < 160; i++) win.push_back(frame160[i]);
         // fbank 帧 f 覆盖 [f*160, f*160+400)：每收满一帧可新算一帧。
         // 窗口起点须对齐 160 网格：保留最近 480 采样，取前 400 为一帧。
-        if (win.size() < 480) return {PvadStream::Out{}, false};
+        if (win.size() < 480) return Step{};
         float w[400], f80[80];
         std::copy(win.begin(), win.begin() + 400, w);
         fbank.compute_one(w, f80);
         win.erase(win.begin(), win.begin() + 160);
         auto o = stream.push_frame(f80);
-        bool fire = false;
-        if (o.valid && o.gated) fire = gate.update(o.p);
-        return {o, fire};
+        Step st;
+        st.o = o;
+        if (!o.valid) return st;
+        // VAD 门控打分：非语音帧只报数不更新门控
+        if (!sp) return st;
+        if (warmup_left > 0) {
+            warmup_left--;
+            return st;
+        }
+        st.scored = true;
+        st.fire = gate.update(o.p);
+        return st;
     }
 };
 
@@ -363,15 +396,103 @@ int run_wav_stream(const Args& a) {
     int first = -1;
     float maxp = 0.f;
     for (size_t i = 0; i < n; i++) {
-        auto [o, fire] = runner.process(&samples[i * 160], i * 0.01);
-        if (o.p > maxp) maxp = o.p;
-        if (fire && first < 0) first = (int)o.frame;
-        if (o.valid && o.gated)
-            printf("[t=%6.2f] p_target=%.4f consec=%d%s\n", o.frame * 0.01, o.p,
-                   runner.gate.consec(), fire ? "  >>> INTERRUPT <<<" : "");
+        auto st = runner.process(&samples[i * 160], i * 0.01);
+        if (st.o.p > maxp) maxp = st.o.p;
+        if (st.fire && first < 0) first = (int)st.o.frame;
+        if (st.scored)
+            printf("[t=%6.2f] p_target=%.4f consec=%d%s\n", st.o.frame * 0.01, st.o.p,
+                   runner.gate.consec(), st.fire ? "  >>> INTERRUPT <<<" : "");
     }
     printf("wav-stream done: first_trigger_frame=%d max_p=%.4f\n", first, maxp);
     return 0;
+}
+
+// ---------------- 90s 剧本长流回归（--long-stream-test） ----------------
+// labels json（scripts/longstream_check.py --build 生成）：
+//   {"frame_ms":10, "script":[{"label":0|1|2,"dur":秒,"kind":"n|a|b|c"}, ...], "labels":[...]}
+// 判定：目标段(a)必须触发；噪声段(n)不得触发（VAD 门控下应恒为 0）；
+// 非目标语音段(b/c)统计触发数（已知限制：模型冷启动 FAR，阈值见下）。
+int run_long_stream_test(const Args& a) {
+    std::string wav_path = a.wav.empty() ? "test_audio/longstream/script90.wav" : a.wav;
+    std::string lbl_path = wav_path.substr(0, wav_path.find_last_of('.')) + "_labels.json";
+    WavData wd = read_wav(wav_path);
+    std::vector<float> samples = wd.samples;
+    Template tpl = load_template(a.tpl);
+    Denoise den;
+    if (a.denoise == "rnnoise") {
+        std::vector<float> out(samples.size());
+        size_t nf = samples.size() / 160;
+        for (size_t i = 0; i < nf; i++) den.process(&samples[i * 160], &out[i * 160]);
+        samples = std::move(out);
+    }
+    StreamRunner runner(a, tpl.pos);
+
+    // 极简解析 script 段表（按序提取 "label":N 与 "dur":F 与 "kind":"x"）
+    struct Seg { int label; double dur; char kind; };
+    std::vector<Seg> segs;
+    {
+        FILE* f = fopen(lbl_path.c_str(), "rb");
+        if (!f) { fprintf(stderr, "cannot open labels: %s\n", lbl_path.c_str()); return 1; }
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        std::string js(sz > 0 ? sz : 1, '\0');
+        if (sz > 0) fread(&js[0], 1, sz, f);
+        fclose(f);
+        size_t pos = 0;
+        while (true) {
+            size_t p = js.find("\"label\":", pos);
+            if (p == std::string::npos) break;
+            Seg s{0, 0, '?'};
+            s.label = atoi(js.c_str() + p + 8);
+            size_t dp = js.find("\"dur\":", p);
+            size_t kp = js.find("\"kind\":", p);
+            if (dp != std::string::npos) s.dur = atof(js.c_str() + dp + 6);
+            if (kp != std::string::npos) s.kind = js[kp + 8];
+            segs.push_back(s);
+            pos = p + 8;
+        }
+    }
+    if (segs.empty()) { fprintf(stderr, "no script segments parsed from %s\n", lbl_path.c_str()); return 1; }
+
+    size_t total_frames = samples.size() / 160;
+    size_t fi = 0;
+    int ok = 0, miss = 0, noise_false = 0, speech_false = 0;
+    printf("long-stream: %s (%.1fs), %zu segments, policy=VAD门控+段末复位+warmup%d+confirm%d\n",
+           wav_path.c_str(), samples.size() / 16000.0, segs.size(),
+           a.warmup_frames, a.stream_confirm);
+    double t0 = 0;
+    for (auto& seg : segs) {
+        double t1 = t0 + seg.dur;
+        int first_fire = -1;
+        float maxp = 0.f;
+        for (; fi < total_frames && fi * 0.01 < t1 - 1e-6; fi++) {
+            auto st = runner.process(&samples[fi * 160], fi * 0.01);
+            if (st.o.p > maxp) maxp = st.o.p;
+            if (st.fire && first_fire < 0) first_fire = (int)st.o.frame;
+        }
+        const char* kind_name = seg.label == 2 ? "target" : (seg.label == 0 ? "noise" : "nontgt");
+        const char* verdict = "";
+        if (seg.label == 2) {
+            if (first_fire >= 0) { verdict = "OK"; ok++; }
+            else { verdict = "MISS"; miss++; }
+        } else if (seg.label == 0) {
+            if (first_fire >= 0) { verdict = "FALSE"; noise_false++; }
+            else verdict = "ok";
+        } else {
+            if (first_fire >= 0) { verdict = "FALSE(known)"; speech_false++; }
+            else verdict = "ok";
+        }
+        printf("  t=%5.1f-%5.1fs %-6s meanP=- maxP=%.3f fire@%d %s\n",
+               t0, t1, kind_name, maxp, first_fire, verdict);
+        t0 = t1;
+    }
+    // PASS：目标段全触发（必须）；噪声段触发 <=1、非目标语音段触发 <=3
+    // （python 双边验证的残余冷启动 FAR 上限，彻底消除需长流重训）
+    bool pass = (miss == 0) && (noise_false <= 1) && (speech_false <= 3);
+    printf("long-stream: target_ok=%d miss=%d noise_false=%d speech_false=%d -> %s\n",
+           ok, miss, noise_false, speech_false, pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
 }
 
 // 性能实测：旧路径（每帧全段重算）vs 新路径（流式 chunk 推理）
@@ -526,10 +647,10 @@ int run_realtime(const Args& a) {
             float dn[160], clean[160];
             if (use_den) { den.process(frame, dn); src = dn; }
             if (a.aec && far_ptr) { aec.process(src, far_ptr, clean); src = clean; }
-            auto [o, fire] = runner.process(src, t);
-            if (o.valid && o.gated)
-                printf("[t=%6.2f] p_target=%.4f consec=%d%s\n", o.frame * 0.01, o.p,
-                       runner.gate.consec(), fire ? "  >>> INTERRUPT <<<" : "");
+            auto st = runner.process(src, t);
+            if (st.scored)
+                printf("[t=%6.2f] p_target=%.4f consec=%d%s\n", st.o.frame * 0.01, st.o.p,
+                       runner.gate.consec(), st.fire ? "  >>> INTERRUPT <<<" : "");
             t += 0.01;
             f++;
         }
@@ -654,6 +775,7 @@ int main(int argc, char** argv) {
         if (a.mic) return run_realtime(a);
         if (a.bench_stream) return run_bench_stream(a);
         if (a.wav_stream) return run_wav_stream(a);
+        if (a.long_stream_test) return run_long_stream_test(a);
         if (!a.batch_list.empty()) return run_batch(a);
         if (!a.wav.empty()) return run_offline(a);
         usage();

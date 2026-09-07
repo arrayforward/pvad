@@ -108,7 +108,9 @@ pvad 门控只用正质心；`--neg`/`--cohort` 仅供 asnorm 门控。
 | `--pvad-model PATH` | `models/pvad/pvad_v4.onnx` | PVAD 模型（默认 v4；版本切换见 4.4）。离线/批量用 |
 | `--pvad-stream-model PATH` | `models/pvad/pvad_v4_stream.onnx` | 实时流式模型（GRU state 外置；`--mic`/`--wav-stream` 用） |
 | `--enroll-wav PATH` | — | 流式 CMVN 先验来源（enrollment 音频，显著抑制冷启动假阳，见 5.2） |
-| `--warmup-frames` | 50 | 流式 warm-up 帧数（0.5s，期间不门控） |
+| `--warmup-frames` | 20 | 流式 warm-up（**VAD 语音帧数**，会话/分段复位后入门控前须积累的帧数） |
+| `--stream-confirm` | 4 | 流式门控 confirm（压冷启动 blip，长流诊断结论；离线整段仍用 `--confirm`） |
+| `--long-stream-test` | — | 隐藏模式：90s 剧本长流回归（labels json 判定：目标段全触发+噪声段 ≤1+非目标语音段 ≤3 为 PASS） |
 | `--wav-stream` | off | 隐藏模式：离线文件走流式路径（与整段 --wav 对照正确性） |
 | `--bench-stream` | — | 实测流式 vs 全段重算单帧耗时后退出 |
 | `--pvad-threshold` | 0.5 | P(target) 触发阈值。降 FAR 可试 0.6 |
@@ -266,20 +268,27 @@ python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-### 5.2 实时/流式路径的 warm-up、CMVN 先验与 SAPI 域注意
+### 5.2 实时/流式路径的长流会话策略、CMVN 先验与 SAPI 域注意
 
-实时流式路径（`pvad_v4_stream.onnx`）用 **EMA CMVN**（α=0.02，因果指数滑动均值），
-会话起始 0.5s（50 帧）warm-up 不门控。要点：
+实时流式路径（`pvad_v4_stream.onnx`）用 **EMA CMVN**（α=0.02，因果指数滑动均值）。
+**长流会话策略**（v4 修复，详见 DESIGN.md §4.4）：
 
+- **VAD 门控打分**：只在 silero VAD 判语音（p>0.5）的帧上更新门控（MUSAN 噪声恒低，
+  天然免假阳）
+- **VAD speech-end 会话分段复位**：只清 GRU state（EMA/先验保留）——解除长时间连续
+  非目标语音后的"一切皆非目标"吸收态（旧行为：60s+ 后注册用户完全漏检）
+- **复位后 warm-up 20 个 VAD 帧 + confirm=4** 压冷启动尖峰
 - **CMVN 先验**：EMA 从 0 起步时前 ~0.5-1.5s 特征未归一化，SAPI 合成音上会造成
-  冷启动假阳（B/echo 也短暂高 P）。给 CLI 传 `--enroll-wav <注册音频>` 让 EMA 从
-  enrollment 的 fbank 均值起步（qt_demo 注册时自动累计先验并随 segments.json 持久化，
-  无需手动操作）；先验显著抑制冷启动（echo 假阳帧 152→0）
-- **SAPI 域限制**：v4s 对 SAPI 注册人的目标证据集中在前 ~0.35s，会被 0.5s warm-up
-  挡住（A 漏触发）；真实人声无此问题。SAPI 验证走整段路径（--wav / auto-test），
-  流式正确性以真实人声混合物为准（python 流式 e2e 94.5%/82.5%）
-- 相关参数：`--pvad-stream-model`、`--enroll-wav`、`--warmup-frames`、`--wav-stream`
-  （离线文件走流式路径做正确性对照）、`--bench-stream`（新旧路径单帧耗时对比）
+  冷启动假阳。给 CLI 传 `--enroll-wav <注册音频>` 让 EMA 从 enrollment 的 fbank 均值
+  起步（qt_demo 注册时自动累计先验并随 segments.json 持久化，无需手动操作）
+- **已知限制**：分段复位后非目标语音段仍有 ~3/6 的残余触发（模型冷启动 FAR，
+  长流回归 `--long-stream-test` 判据：目标段全触发+噪声段 ≤1+非目标语音段 ≤3），
+  彻底消除需长流数据重训
+- **SAPI 域限制**：v4s 对 SAPI 注册人的目标证据集中在前 ~0.35s，SAPI 验证走整段路径
+  （--wav / auto-test），流式正确性以真实人声为准
+- 相关参数：`--pvad-stream-model`、`--enroll-wav`、`--warmup-frames`（VAD 帧数）、
+  `--stream-confirm`、`--wav-stream`（离线文件走流式路径做正确性对照）、
+  `--long-stream-test`（90s 剧本长流回归）、`--bench-stream`（新旧路径单帧耗时对比）
 - 历史包袱：旧实时路径每 10ms 全段重算（8s 段长处 11.54ms/帧超实时），已被
   PvadStream（稳态 0.029ms/帧）取代
 

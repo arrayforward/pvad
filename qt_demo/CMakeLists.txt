@@ -24,6 +24,7 @@ add_library(pipe STATIC
     ${PROJ_ROOT}/src/pvad.cpp
     ${PROJ_ROOT}/src/pvad_stream.cpp
     ${PROJ_ROOT}/src/denoise.cpp
+    ${PROJ_ROOT}/src/vad.cpp
 )
 target_include_directories(pipe PUBLIC ${PROJ_ROOT}/src ${ORT_DIR}/include)
 target_link_libraries(pipe PUBLIC ${ORT_DIR}/lib/onnxruntime.lib)

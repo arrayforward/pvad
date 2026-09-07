@@ -87,8 +87,9 @@ void Engine::init() {
     try {
         stream_ = std::make_unique<PvadStream>(
             (root + "/models/pvad/pvad_v4_stream.onnx").toStdString());
+        vad_ = std::make_unique<Vad>((root + "/models/silero_vad.onnx").toStdString());
         refreshStreamEnroll();
-        emit logLine("流式 PVAD 已加载 (pvad_v4_stream)");
+        emit logLine("流式 PVAD 已加载 (pvad_v4_stream + silero VAD)");
     } catch (const std::exception& e) {
         emit logLine("流式 PVAD 加载失败（麦克风监听不可用）: " + QString::fromStdString(e.what()));
     }
@@ -226,8 +227,11 @@ void Engine::startListenMic() {
     if (!openCapture()) return;
     core_.reset_stream();
     stream_->reset();
+    vad_->reset();
     sgate_.reset();
     swin_.clear();
+    svad_speech_ = false;
+    warmup_left_ = 20;
     refreshStreamEnroll();
     interrupt_latched_ = false;
     if (ma_device_start(&cap_) != MA_SUCCESS) { emit logLine("采集启动失败"); return; }
@@ -470,6 +474,19 @@ void Engine::tick() {
         const float* src = frame;
         float dn[160];
         if (denoise_) { denoise_->process(frame, dn); src = dn; }
+        // 长流会话策略（与 CLI StreamRunner 一致）：
+        // 1) silero VAD 判语音的帧才入门控；2) VAD speech-end 会话分段复位
+        // （只清 GRU state，保留 EMA/先验）；3) 复位后 warm-up 20 VAD 帧，confirm=4
+        float vp = vad_->process(src, 160);
+        bool sp = vp >= 0.f && vp > 0.5f;
+        if (vp >= 0.f && sp != svad_speech_) {
+            if (svad_speech_ && !sp) {
+                stream_->reset_gru();
+                sgate_.reset();
+                warmup_left_ = 20;
+            }
+            svad_speech_ = sp;
+        }
         // 流式 PVAD：单帧 fbank（对齐 480 窗）+ chunk GRU 增量推理，每帧 O(1)
         for (int i = 0; i < 160; i++) swin_.push_back(src[i]);
         if (swin_.size() < 480) continue;
@@ -478,7 +495,8 @@ void Engine::tick() {
         sfbank_.compute_one(w, f80);
         swin_.erase(swin_.begin(), swin_.begin() + 160);
         auto o = stream_->push_frame(f80);
-        if (!o.valid || !o.gated) continue;
+        if (!o.valid || !sp) continue;
+        if (warmup_left_ > 0) { warmup_left_--; continue; }
         bool fire = sgate_.update(o.p);
         FrameEvent ev;
         ev.p = o.p;

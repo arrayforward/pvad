@@ -40,6 +40,11 @@ public:
     // 逐帧对齐：首个 chunk 凑满前的帧返回 p=0, gated=false）。
     Out push_frame(const float* fbank80);
     void reset();  // 新会话：GRU state / EMA / warm-up 计数全清零
+    // 仅重置 GRU 会话状态（h/未凑满 chunk/待发分数），保留 EMA 与先验——
+    // 用于长流中 VAD speech-end 处的"会话分段复位"（见 DESIGN 长流诊断）：
+    // 解除长时间非目标语音后的"全非目标吸收态"，同时避免 EMA 冷启动。
+    // 分数对齐：下一个发出分数的绝对帧号跳到当前推入帧号。
+    void reset_gru();
     size_t frames() const { return out_frame_; }
     static constexpr size_t kWarmupFrames = 50;  // 0.5s warm-up 不门控
 
@@ -59,4 +64,5 @@ private:
     std::vector<float> probs_;   // 最近 chunk 的逐帧 P(target)，逐帧取出
     size_t prob_next_ = 0;
     size_t out_frame_ = 0;   // 已发出分数的绝对帧号
+    size_t in_frame_ = 0;    // 已推入的 fbank 帧数（绝对帧号）
 };
