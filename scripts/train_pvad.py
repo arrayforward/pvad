@@ -317,6 +317,39 @@ def collate(batch):
     return x, e, kv_mask, y, w
 
 
+class _MixedBatchSampler:
+    """批内长短混合采样: 每 batch 固定 long_ratio 个长样本 (ConcatDataset 索引,
+    长流索引 = n_short + j), 两侧各自洗牌循环, 短样本用尽重洗。"""
+
+    def __init__(self, n_short, n_long, batch, long_ratio, seed=0):
+        self.n_short, self.n_long = n_short, n_long
+        self.n_l = max(1, round(batch * long_ratio))
+        self.n_s = batch - self.n_l
+        self.rng = np.random.default_rng(seed)
+        # 步数由长流侧决定 (每 epoch 覆盖全部长流; 短侧取等量洗牌子集)
+        self.steps = int(np.ceil(n_long / self.n_l))
+
+    def __len__(self):
+        return self.steps
+
+    def __iter__(self):
+        s_idx = self.rng.permutation(self.n_short)
+        l_idx = self.rng.permutation(self.n_long)
+        si = li = 0
+        for _ in range(self.steps):
+            bs = s_idx[si:si + self.n_s]
+            si += self.n_s
+            if si >= self.n_short:
+                s_idx = self.rng.permutation(self.n_short)
+                si = 0
+            bl = l_idx[li:li + self.n_l] + self.n_short
+            li += self.n_l
+            if li >= self.n_long:
+                l_idx = self.rng.permutation(self.n_long)
+                li = 0
+            yield np.concatenate([bs, bl]).tolist()
+
+
 @torch.no_grad()
 def evaluate(model, loader, class_weight):
     model.eval()
@@ -380,6 +413,9 @@ def main():
                     help="从已有 checkpoint 初始化 (微调)")
     ap.add_argument("--aug-weight", type=float, default=1.0,
                     help="增广样本 (src==v2) 的 loss 权重 (默认 1)")
+    ap.add_argument("--mix-long-dir", default=None,
+                    help="长流数据目录 (批内按 mix-long-ratio 混合)")
+    ap.add_argument("--mix-long-ratio", type=float, default=0.5)
     args = ap.parse_args()
 
     torch.set_num_threads(max(1, (os_cpu() or 8)))
@@ -393,9 +429,24 @@ def main():
     val_ds = MixtureDataset(args.val_dir, feats_subdir=args.feats_subdir,
                             use_tokens=use_tokens)
     print(f"train {len(train_ds)} 条, val {len(val_ds)} 条")
-    train_ld = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
-                          collate_fn=collate, num_workers=args.workers,
-                          persistent_workers=args.workers > 0)
+    if args.mix_long_dir:
+        # 批内长短混合: 每 batch 按比例各取短/长样本 (采样器混合, 非串行)
+        long_ds = MixtureDataset(args.mix_long_dir, feats_subdir=args.feats_subdir,
+                                 use_tokens=use_tokens)
+        from torch.utils.data import ConcatDataset
+        train_ds = ConcatDataset([train_ds, long_ds])
+        n_short = len(train_ds.datasets[0])
+        n_long = len(train_ds.datasets[1])
+        print(f"  + 长流 {n_long} 条, 批内长短比 {1 - args.mix_long_ratio:.0f}:"
+              f"{args.mix_long_ratio:.0f}")
+        train_ld = DataLoader(train_ds, collate_fn=collate, num_workers=0,
+                              batch_sampler=_MixedBatchSampler(n_short, n_long,
+                                                               args.batch,
+                                                               args.mix_long_ratio))
+    else:
+        train_ld = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
+                              collate_fn=collate, num_workers=args.workers,
+                              persistent_workers=args.workers > 0)
     val_ld = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
                         collate_fn=collate, num_workers=0)
 

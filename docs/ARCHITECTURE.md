@@ -154,6 +154,8 @@ qt_demo 的 `enrollment/tpl.bin` 与 CLI `enroll` 产物完全同格式，双向
 | `pvad/pvad_v5s_stream.onnx` | state 外置 | 可选 | cos 注意力，92.0/85.0（干净场景可选） |
 | `pvad/pvad_v5_stream.onnx` | state 外置 | **禁用** | v5 流式版：增广 −17pp 不达标 |
 | `pvad/pvad_v6.onnx`/`pvad_v6_stream.onnx` | tokens+mask | 终止 | per-frame CMVN：抹掉段级能量动态，增广 77.5%，方向终止 |
+| `pvad/pvad_v7.onnx`/`pvad_v7_stream.onnx` | tokens+mask / state 外置 | **勿用** | 纯长流微调：吸收态根治但短句崩溃（干净 76.0%） |
+| `pvad/pvad_v7b.onnx`/`pvad_v7b_stream.onnx` | tokens+mask / state 外置 | 存档可选 | 长短混合微调：吸收态根治+干净 96.5%，增广 79.5% 差线未过，生产未换（部署建议见其 md） |
 
 `.onnx.data` 为外部权重，必须与同名 `.onnx` 同目录。`best*.pt` 为训练 checkpoint
 （fine-tune 入口，见 TRAINING.md）。
