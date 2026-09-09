@@ -157,6 +157,7 @@ qt_demo 的 `enrollment/tpl.bin` 与 CLI `enroll` 产物完全同格式，双向
 | `pvad/pvad_v7.onnx`/`pvad_v7_stream.onnx` | tokens+mask / state 外置 | **勿用** | 纯长流微调：吸收态根治但短句崩溃（干净 76.0%） |
 | `pvad/pvad_v7b.onnx`/`pvad_v7b_stream.onnx` | tokens+mask / state 外置 | 存档可选 | 长短混合微调：吸收态根治+干净 96.5%，增广 79.5% 差线未过，生产未换（部署建议见其 md） |
 | `pvad/pvad_v8.onnx`/`pvad_v8_stream.onnx` | tokens+mask / state 外置 | **勿用** | 从零重训（4 epoch × ~100min 预算）：四项验收未过线（干净 91.0/增广 59.5/长流召回 65.1%/冷启动更差），从零路线在该预算下被证伪，v7b 微调全面占优 |
+| `pvad/pvad_v8r.onnx`/`pvad_v8r_stream.onnx` | tokens+mask / state 外置 | **勿用** | 从零最终裁决（cosine lr + emb 投影块，10 epoch ~14.5h）：长流召回 82.2%/冷启动 maxP 0.018 四方最优，但干净 90.0/增广 69.5 全面输 v7b——从零路线不可行，系列关闭 |
 
 `.onnx.data` 为外部权重，必须与同名 `.onnx` 同目录。`best*.pt` 为训练 checkpoint
 （fine-tune 入口，见 TRAINING.md）。

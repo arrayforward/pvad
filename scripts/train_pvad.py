@@ -255,6 +255,37 @@ MODELS["film_attn_ln"] = PvadModelFilmAttnV5LN
 MODELS["film_attn_cos"] = PvadModelFilmAttnV5Cos
 
 
+class PvadModelFiLMEbp(nn.Module):
+    """v8r: FiLM + enrollment 投影块 Linear(192->128)->ELU->LayerNorm,
+    投影结果喂 FiLM 的 gamma/beta 生成 (cond="film_ebp")。"""
+
+    def __init__(self, feat_dim=FEAT_DIM, emb_dim=EMB_DIM, hidden=128, proj=128):
+        super().__init__()
+        self.emb_proj = nn.Linear(emb_dim, proj)
+        self.emb_elu = nn.ELU()
+        self.emb_ln = nn.LayerNorm(proj)
+        self.film_in = nn.Linear(proj, 2 * feat_dim)
+        self.gru1 = nn.GRU(feat_dim, hidden, batch_first=True)
+        self.film_h = nn.Linear(proj, 2 * hidden)
+        self.gru2 = nn.GRU(hidden, hidden, batch_first=True)
+        self.fc = nn.Linear(hidden, NUM_CLASSES)
+
+    def forward(self, feats, emb):
+        e = self.emb_ln(self.emb_elu(self.emb_proj(emb)))
+        gb1 = self.film_in(e).unsqueeze(1)
+        fd = feats.shape[-1]
+        h = feats * (1.0 + gb1[..., :fd]) + gb1[..., fd:]
+        h, _ = self.gru1(h)
+        gb2 = self.film_h(e).unsqueeze(1)
+        hd = h.shape[-1]
+        h = h * (1.0 + gb2[..., :hd]) + gb2[..., hd:]
+        h, _ = self.gru2(h)
+        return self.fc(h)
+
+
+MODELS["film_ebp"] = PvadModelFiLMEbp
+
+
 class MixtureDataset(Dataset):
     def __init__(self, mix_dir, max_n=None, feats_subdir="feats", use_tokens=False,
                  aug_weight=1.0):
@@ -402,7 +433,7 @@ def main():
     ap.add_argument("--ckpt-name", default="best.pt")
     ap.add_argument("--log-name", default="train_log.json")
     ap.add_argument("--cond", choices=["concat", "film", "attn", "attn5", "film_attn",
-                                       "film_attn_ln", "film_attn_cos"],
+                                       "film_attn_ln", "film_attn_cos", "film_ebp"],
                     default="concat", help="enrollment 条件机制")
     ap.add_argument("--save-all-epochs", action="store_true",
                     help="每个 epoch 都保存 checkpoint (<ckpt-stem>_epNN.pt), "
@@ -416,6 +447,9 @@ def main():
     ap.add_argument("--mix-long-dir", default=None,
                     help="长流数据目录 (批内按 mix-long-ratio 混合)")
     ap.add_argument("--mix-long-ratio", type=float, default=0.5)
+    ap.add_argument("--lr-sched", choices=["const", "cosine"], default="const")
+    ap.add_argument("--lr-min", type=float, default=1e-4,
+                    help="cosine 衰减的下限 (lr_sched=cosine 时生效)")
     args = ap.parse_args()
 
     torch.set_num_threads(max(1, (os_cpu() or 8)))
@@ -477,6 +511,9 @@ def main():
     class_weight = torch.tensor([1.0, args.weight1, args.target_weight])
     crit = nn.CrossEntropyLoss(weight=class_weight, ignore_index=-100)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    sched = (torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=args.epochs, eta_min=args.lr_min)
+        if args.lr_sched == "cosine" else None)
 
     log = {"config": vars(args), "n_params": n_params, "epochs": []}
     best_f1 = -1.0
@@ -500,8 +537,11 @@ def main():
             n += wf.sum().item()
         train_loss = tot / max(n, 1)
         vm = evaluate(model, val_ld, class_weight)
+        if sched:
+            sched.step()
         el = time.time() - t0
         entry = {"epoch": ep, "train_loss": round(train_loss, 5),
+                 "lr": opt.param_groups[0]["lr"],
                  "elapsed_s": round(el, 1),
                  **{f"val_{k}": round(v, 5) for k, v in vm.items()}}
         log["epochs"].append(entry)

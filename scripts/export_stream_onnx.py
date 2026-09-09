@@ -26,10 +26,16 @@ HIDDEN = 128
 
 
 class StreamWrapper(torch.nn.Module):
-    """FiLM PVAD 的 state 外置封装: (feats_chunk, emb, h0) -> (logits, hN)。"""
+    """FiLM PVAD 的 state 外置封装: (feats_chunk, emb, h0) -> (logits, hN)。
+    兼容 film_ebp (emb 先过 Linear->ELU->LayerNorm 投影块)。"""
 
     def __init__(self, model):
         super().__init__()
+        self.has_ebp = hasattr(model, "emb_proj")
+        if self.has_ebp:
+            self.emb_proj = model.emb_proj
+            self.emb_elu = model.emb_elu
+            self.emb_ln = model.emb_ln
         self.film_in = model.film_in
         self.gru1 = model.gru1
         self.film_h = model.film_h
@@ -37,6 +43,8 @@ class StreamWrapper(torch.nn.Module):
         self.fc = model.fc
 
     def forward(self, feats_chunk, emb, h0):
+        if self.has_ebp:
+            emb = self.emb_ln(self.emb_elu(self.emb_proj(emb)))
         fd = feats_chunk.shape[-1]
         gb1 = self.film_in(emb).unsqueeze(1)
         h = feats_chunk * (1.0 + gb1[..., :fd]) + gb1[..., fd:]
@@ -95,12 +103,12 @@ def main():
 
     state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     cond = state.get("cond", "concat")
-    assert cond in ("film", "film_attn", "film_attn_ln", "film_attn_cos"), \
-        f"流式导出仅支持 film/film_attn 系, 当前 {cond}"
+    assert cond in ("film", "film_ebp", "film_attn", "film_attn_ln", "film_attn_cos"), \
+        f"流式导出仅支持 film/film_ebp/film_attn 系, 当前 {cond}"
     model = MODELS[cond]()
     model.load_state_dict(state["model"])
     model.eval()
-    v5 = cond != "film"
+    v5 = cond in ("film_attn", "film_attn_ln", "film_attn_cos")
     wrapped = StreamWrapperV5(model) if v5 else StreamWrapper(model)
     wrapped.eval()
     print(f"ckpt ep{state.get('epoch')}, params={state.get('n_params'):,}")
