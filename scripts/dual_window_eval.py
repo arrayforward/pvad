@@ -39,8 +39,14 @@ def ema_feats(pcm, m0):
     return out.astype(np.float32)
 
 
-def dual_p2_fixed(sess, feats, emb, W_frames, warm_frames, rule):
-    """正确版：保留 3 类 logits，per-frame softmax 后取目标类。"""
+def dual_p2_fixed(sess, feats, emb, W_frames, warm_frames, rule, theta=None):
+    """双实例流式推理 + 融合。返回逐帧融合 P(target)。
+
+    rule:
+      older/max — 成熟度过滤（窗龄 > warm_frames 才参与），θ 固定 0.5
+      mean      — (PA+PB)/2，无成熟度过滤，门控阈值 θ
+      wmean     — maturity 加权平均 w=min(1,窗龄/warm_frames)，θ 门控
+    """
     T = len(feats)
     h = np.zeros((2, 2, 128), dtype=np.float32)
     age = [0, 0]
@@ -60,8 +66,7 @@ def dual_p2_fixed(sess, feats, emb, W_frames, warm_frames, rule):
         out[:, s:s + cn] = e[:, :, 2]  # [B=2, chunk]
         for inst in (0, 1):
             age[inst] += cn
-    # 融合
-    fused = np.zeros(T, dtype=np.float32)
+    # 各帧窗龄
     ageA = np.zeros(T)
     ageB = np.zeros(T)
     t_arr = np.arange(T)
@@ -71,12 +76,22 @@ def dual_p2_fixed(sess, feats, emb, W_frames, warm_frames, rule):
         if off > 0:
             n0 = min(off, T)  # off 可能超过短文件长度
             arr[:n0] = t_arr[:n0]  # B 实例在 off 前窗龄=t（从流起始跑起）
+
+    pA, pB = out[0], out[1]
+    if rule == "mean":
+        return (pA + pB) / 2.0
+    if rule == "wmean":
+        wA = np.minimum(1.0, ageA / max(warm_frames, 1))
+        wB = np.minimum(1.0, ageB / max(warm_frames, 1))
+        return (wA * pA + wB * pB) / np.maximum(wA + wB, 1e-6)
+    # older / max（成熟度过滤）
+    fused = np.zeros(T, dtype=np.float32)
     for t in range(T):
         cands = []
         if ageA[t] > warm_frames:
-            cands.append((ageA[t], out[0, t]))
+            cands.append((ageA[t], pA[t]))
         if ageB[t] > warm_frames:
-            cands.append((ageB[t], out[1, t]))
+            cands.append((ageB[t], pB[t]))
         if not cands:
             fused[t] = 0.0
         elif rule == "max":
@@ -86,7 +101,7 @@ def dual_p2_fixed(sess, feats, emb, W_frames, warm_frames, rule):
     return fused
 
 
-def gate_events(p2, vad=None, warmup_vad=0, confirm=CONFIRM):
+def gate_events(p2, vad=None, warmup_vad=0, confirm=CONFIRM, thr=THR):
     consec = 0
     warm = warmup_vad
     ev = []
@@ -97,12 +112,12 @@ def gate_events(p2, vad=None, warmup_vad=0, confirm=CONFIRM):
             warm -= 1
             consec = 0
             continue
-        if p > THR:
+        if p > thr:
             consec += 1
             if consec >= confirm:
                 ev.append(t)
                 consec = 0
-        elif p < THR - HYST:
+        elif p < thr - HYST:
             consec = 0
     return ev
 
@@ -137,19 +152,24 @@ def silero_probs(pcm):
 
 
 class DualCfg:
-    def __init__(self, W_s, warm, rule):
+    def __init__(self, W_s, warm, rule, theta=0.5):
         self.W = int(W_s * 100)
         self.warm = warm
         self.rule = rule
+        self.theta = theta
 
     def __str__(self):
+        if self.rule in ("mean", "wmean"):
+            if self.rule == "wmean":
+                return f"W={self.W / 100:.0f}s tau={self.warm} wmean θ={self.theta}"
+            return f"W={self.W / 100:.0f}s mean θ={self.theta}"
         return f"W={self.W / 100:.0f}s warm={self.warm} {self.rule}"
 
 
 def dual_run(sess, feats, emb, cfg, vframe):
     """双窗口 + 生产门控（VAD 门控 + 全局 warm-up + confirm=4）。"""
     p2 = dual_p2_fixed(sess, feats, emb, cfg.W, cfg.warm, cfg.rule)
-    return gate_events(p2, vad=vframe, warmup_vad=20)
+    return gate_events(p2, vad=vframe, warmup_vad=20, thr=cfg.theta)
 
 
 def baseline_run(sess, feats, emb, vframe):
@@ -267,14 +287,16 @@ def main():
     ap.add_argument("--W", type=float, default=8)
     ap.add_argument("--W-list", type=float, nargs="*", default=None)  # 网格分片续跑用
     ap.add_argument("--warmup", type=int, default=20)
-    ap.add_argument("--rule", choices=["older", "max"], default="older")
+    ap.add_argument("--rule", choices=["older", "max", "mean", "wmean"], default="older")
+    ap.add_argument("--theta", type=float, default=0.5)  # mean/wmean 的融合门控阈值
+    ap.add_argument("--grid-mean", action="store_true")  # 第三轮：mean/wmean 网格（W x θ[ x tau]）
     ap.add_argument("--max-n", type=int, default=60)
     ap.add_argument("--max-n-test", type=int, default=300)
     args = ap.parse_args()
 
     sess = ort.InferenceSession(str(STREAM_ONNX), providers=["CPUExecutionProvider"])
     embder = CampplusEmbedder(intra_threads=4)
-    cfg = DualCfg(args.W, args.warmup, args.rule)
+    cfg = DualCfg(args.W, args.warmup, args.rule, args.theta)
 
     if args.grid_val:
         td = ROOT / "data/mixtures_long/val"
@@ -304,6 +326,38 @@ def main():
         for c, m, s90 in rows:
             print(f"  {c}: 90s(tgt{s90[0]}/4 noise{s90[1]} nontgt{s90[2]}) "
                   f"val(rec={m['tgt_rec']:.3f} false={m['nontgt_false']:.3f} pn={m['pn_clean']:.3f})")
+        return 0
+
+    if args.grid_mean:
+        # 第三轮：mean / wmean 网格（W ∈ {6,8}；mean θ∈{0.4..0.7}；wmean τ∈{10,20} × θ∈{0.4..0.6}）
+        td = ROOT / "data/mixtures_long/val"
+        print("=== 第三轮 mean/wmean 网格（val n=60）===")
+        rows = []
+        for W in (6, 8):
+            for theta in (0.4, 0.5, 0.6, 0.7):
+                c = DualCfg(W, 20, "mean", theta)
+                m = eval_long(td, sess, embder, c, args.max_n)
+                s90 = eval_script90(sess, embder, c)
+                sh = eval_short(sess, embder, c, 100)
+                rows.append((c, m, s90, sh))
+                print(f"  {c}: rec={m['tgt_rec']:.3f} false={m['nontgt_false']:.3f} "
+                      f"pn={m['pn_clean']:.3f} | 90s: tgt{s90[0]}/4 noise{s90[1]} nontgt{s90[2]} "
+                      f"| short ok={sh['ok']:.3f}", flush=True)
+            for tau in (10, 20):
+                for theta in (0.4, 0.5, 0.6):
+                    c = DualCfg(W, tau, "wmean", theta)
+                    m = eval_long(td, sess, embder, c, args.max_n)
+                    s90 = eval_script90(sess, embder, c)
+                    sh = eval_short(sess, embder, c, 100)
+                    rows.append((c, m, s90, sh))
+                    print(f"  {c}: rec={m['tgt_rec']:.3f} false={m['nontgt_false']:.3f} "
+                          f"pn={m['pn_clean']:.3f} | 90s: tgt{s90[0]}/4 noise{s90[1]} nontgt{s90[2]} "
+                          f"| short ok={sh['ok']:.3f}", flush=True)
+        print("=== 第三轮汇总（按 val 误触发升序，然后召回降序）===")
+        rows.sort(key=lambda x: (x[1]["nontgt_false"], -x[1]["tgt_rec"]))
+        for c, m, s90, sh in rows:
+            print(f"  {c}: rec={m['tgt_rec']:.3f} false={m['nontgt_false']:.3f} "
+                  f"pn={m['pn_clean']:.3f} 90s({s90[0]}/{s90[1]}/{s90[2]}) short={sh['ok']:.3f}")
         return 0
 
     if args.script90:
