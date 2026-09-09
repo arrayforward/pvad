@@ -86,10 +86,10 @@ void Engine::init() {
     // 实时流式 PVAD（chunked GRU state 复用）
     try {
         stream_ = std::make_unique<PvadStream>(
-            (root + "/models/pvad/pvad_v4_stream.onnx").toStdString());
+            (root + "/models/pvad/pvad_v7b_stream.onnx").toStdString());
         vad_ = std::make_unique<Vad>((root + "/models/silero_vad.onnx").toStdString());
         refreshStreamEnroll();
-        emit logLine("流式 PVAD 已加载 (pvad_v4_stream + silero VAD)");
+        emit logLine("流式 PVAD 已加载 (pvad_v7b_stream + silero VAD)");
     } catch (const std::exception& e) {
         emit logLine("流式 PVAD 加载失败（麦克风监听不可用）: " + QString::fromStdString(e.what()));
     }

@@ -106,7 +106,7 @@ private:
     // 实时流式 PVAD（chunked GRU state 复用 + EMA CMVN），麦克风路径专用
     std::unique_ptr<PvadStream> stream_;
     std::unique_ptr<Vad> vad_;            // silero VAD（长流会话策略的门控/复位依据）
-    PvadGate sgate_{0.5f, 0.2f, 4};       // confirm=4（压冷启动 blip，长流诊断结论）
+    PvadGate sgate_{0.5f, 0.2f, 2};       // confirm=2（v7b 默认；v4_stream 时代为 4 压冷启动 blip）
     std::deque<float> swin_;              // fbank 对齐窗（480 采样）
     Fbank sfbank_;
     bool svad_speech_ = false;            // 上一帧 VAD 语音判定

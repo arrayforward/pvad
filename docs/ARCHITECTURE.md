@@ -150,12 +150,12 @@ qt_demo 的 `enrollment/tpl.bin` 与 CLI `enroll` 产物完全同格式，双向
 | `pvad/pvad_v3.onnx` | 单向量 | 存档 | v3（FiLM） |
 | `pvad/pvad_v4.onnx` | 单向量 | 存档 | v4（硬负例；前离线默认） |
 | `pvad/pvad_v5.onnx` | tokens+mask | **生产（离线默认）** | 多帧注意力，93.0/89.4 |
-| `pvad/pvad_v4_stream.onnx` | state 外置 | **生产（实时默认）** | EMA-CMVN 微调，94.5/82.5 |
+| `pvad/pvad_v4_stream.onnx` | state 外置 | 备选（持续强噪/混响） | EMA-CMVN 微调，94.5/82.5（增广鲁棒性最好；无吸收态免疫，需会话策略） |
 | `pvad/pvad_v5s_stream.onnx` | state 外置 | 可选 | cos 注意力，92.0/85.0（干净场景可选） |
 | `pvad/pvad_v5_stream.onnx` | state 外置 | **禁用** | v5 流式版：增广 −17pp 不达标 |
 | `pvad/pvad_v6.onnx`/`pvad_v6_stream.onnx` | tokens+mask | 终止 | per-frame CMVN：抹掉段级能量动态，增广 77.5%，方向终止 |
 | `pvad/pvad_v7.onnx`/`pvad_v7_stream.onnx` | tokens+mask / state 外置 | **勿用** | 纯长流微调：吸收态根治但短句崩溃（干净 76.0%） |
-| `pvad/pvad_v7b.onnx`/`pvad_v7b_stream.onnx` | tokens+mask / state 外置 | 存档可选 | 长短混合微调：吸收态根治+干净 96.5%，增广 79.5% 差线未过，生产未换（部署建议见其 md） |
+| `pvad/pvad_v7b.onnx`/`pvad_v7b_stream.onnx` | tokens+mask / state 外置 | **生产（实时默认，v7b_stream）** | 长短混合微调：吸收态根治+干净 96.5%+冷启动 maxP 0.014，增广 79.5% 差线未过——2026-09-08 用户复核后采纳为实时默认（DESIGN.md §4.4） |
 | `pvad/pvad_v8.onnx`/`pvad_v8_stream.onnx` | tokens+mask / state 外置 | **勿用** | 从零重训（4 epoch × ~100min 预算）：四项验收未过线（干净 91.0/增广 59.5/长流召回 65.1%/冷启动更差），从零路线在该预算下被证伪，v7b 微调全面占优 |
 | `pvad/pvad_v8r.onnx`/`pvad_v8r_stream.onnx` | tokens+mask / state 外置 | **勿用** | 从零最终裁决（cosine lr + emb 投影块，10 epoch ~14.5h）：长流召回 82.2%/冷启动 maxP 0.018 四方最优，但干净 90.0/增广 69.5 全面输 v7b——从零路线不可行，系列关闭 |
 

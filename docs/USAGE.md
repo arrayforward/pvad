@@ -45,7 +45,8 @@ tar xjf /tmp/sherpa.tar.bz2 && mv sherpa-onnx-v1.13.6-win-x64-shared-MD-Release 
 | `models/pvad/pvad_v3.onnx(+ .data)` | ~1MB | PVAD v3（FiLM 条件） |
 | `models/pvad/pvad_v4.onnx(+ .data)` | ~1MB | PVAD v4（FiLM 条件） |
 | `models/pvad/pvad_v5.onnx(+ .data)` | ~1MB | PVAD v5（多帧 tokens+交叉注意力，**离线默认**：增广历代最佳） |
-| `models/pvad/pvad_v4_stream.onnx(+ .data)` | ~1MB | PVAD v4 流式（GRU state 外置，**实时默认**） |
+| `models/pvad/pvad_v4_stream.onnx(+ .data)` | ~1MB | PVAD v4 流式（GRU state 外置，**实时备选**：持续强噪/混响，增广鲁棒性最好） |
+| `models/pvad/pvad_v7b_stream.onnx(+ .data)` | ~1MB | PVAD v7b 流式（长短混合微调，**实时默认**：吸收态免疫+干净 96.5%+冷启动 maxP 0.014） |
 | `models/pvad/pvad_v5_stream.onnx(+ .data)` | ~1MB | PVAD v5 流式（**不达标禁用**，增广 −17pp） |
 | `models/pvad/best*.pt` | 各 ~1MB | 训练 checkpoint（fine-tune 入口，TRAINING.md 复现用） |
 
@@ -106,10 +107,10 @@ pvad 门控只用正质心；`--neg`/`--cohort` 仅供 asnorm 门控。
 | `--template PATH` | `tpl.bin` | enroll 产物 |
 | `--gate pvad\|asnorm` | `pvad` | 门控模式。pvad 双讲场景远优于 asnorm |
 | `--pvad-model PATH` | `models/pvad/pvad_v4.onnx` | PVAD 模型（默认 v4；版本切换见 4.4）。离线/批量用 |
-| `--pvad-stream-model PATH` | `models/pvad/pvad_v4_stream.onnx` | 实时流式模型（GRU state 外置；`--mic`/`--wav-stream` 用） |
+| `--pvad-stream-model PATH` | `models/pvad/pvad_v7b_stream.onnx` | 实时流式模型（GRU state 外置；`--mic`/`--wav-stream`/`--long-stream-test` 用；强噪混响环境可切回 pvad_v4_stream.onnx） |
 | `--enroll-wav PATH` | — | 流式 CMVN 先验来源（enrollment 音频，显著抑制冷启动假阳，见 5.2） |
 | `--warmup-frames` | 20 | 流式 warm-up（**VAD 语音帧数**，会话/分段复位后入门控前须积累的帧数） |
-| `--stream-confirm` | 4 | 流式门控 confirm（压冷启动 blip，长流诊断结论；离线整段仍用 `--confirm`） |
+| `--stream-confirm` | 2 | 流式门控 confirm（v7b 默认 2——confirm=4 在 v7b 下会漏掉剧本首个目标段；v4_stream 时代为 4。离线整段仍用 `--confirm`） |
 | `--long-stream-test` | — | 隐藏模式：90s 剧本长流回归（labels json 判定：目标段全触发+噪声段 ≤1+非目标语音段 ≤3 为 PASS） |
 | `--wav-stream` | off | 隐藏模式：离线文件走流式路径（与整段 --wav 对照正确性） |
 | `--bench-stream` | — | 实测流式 vs 全段重算单帧耗时后退出 |
@@ -246,9 +247,11 @@ windeployqt 自动拷贝；sherpa/onnxruntime DLL 一并拷贝（onnxruntime.dll
 
 - CLI 离线：`--pvad-model models/pvad/pvad_v5.onnx`（**默认已是 v5**；v1-v4 单向量接口与
   v5 tokens 接口自动检测适配，模板用 v4 格式含 tokens）
-- CLI 实时 / qt_demo 麦克风：`pvad_v4_stream.onnx`（**不要用 pvad_v5_stream.onnx**——
+- CLI 实时 / qt_demo 麦克风：`pvad_v7b_stream.onnx`（**2026-09-08 起实时默认**——v7b
+  吸收态免疫+干净 96.5%+冷启动 maxP 0.014，增广 −3pp 为已知代价；持续强噪/混响环境
+  退回备选 `pvad_v4_stream.onnx`。**不要用 pvad_v5_stream.onnx**——
   v5 流式版增广条件 −17pp 不达标，见 models/pvad/pvad_v5_stream.md 的如实记录；
-  这就是"离线 v5 / 实时 v4_stream"双模型部署的原因）
+  这就是"离线 v5 / 实时 v7b_stream"双模型部署的原因）
 - qt_demo 离线：默认编译期写死 `models/pvad/pvad_v5.onnx`（`engine.cpp` 的 `init()`）
 - **离线默认 v5 的理由**：增广 89.4%/误打断 10.0% 历代最佳（v4 为 83.0%/16.4%），
   干净与 v4 持平（93.0% vs 94.0%，−1.0pp 验收线内）
@@ -270,8 +273,8 @@ python -m venv .venv
 
 ### 5.2 实时/流式路径的长流会话策略、CMVN 先验与 SAPI 域注意
 
-实时流式路径（`pvad_v4_stream.onnx`）用 **EMA CMVN**（α=0.02，因果指数滑动均值）。
-**长流会话策略**（v4 修复，详见 DESIGN.md §4.4）：
+实时流式路径（`pvad_v7b_stream.onnx`）用 **EMA CMVN**（α=0.02，因果指数滑动均值）。
+**长流会话策略**（v4 修复，详见 DESIGN.md §4.4；v7b 免疫吸收态后 confirm 降回 2）：
 
 - **VAD 门控打分**：只在 silero VAD 判语音（p>0.5）的帧上更新门控（MUSAN 噪声恒低，
   天然免假阳）

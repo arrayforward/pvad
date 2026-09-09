@@ -33,7 +33,7 @@ struct Args {
     std::string vad_model = "models/silero_vad.onnx";
     std::string spk_model = "models/campplus.onnx";
     std::string pvad_model = "models/pvad/pvad_v5.onnx";
-    std::string pvad_stream_model = "models/pvad/pvad_v4_stream.onnx";  // 实时流式专用
+    std::string pvad_stream_model = "models/pvad/pvad_v7b_stream.onnx";  // 实时流式专用（默认 v7b；v4_stream 备选，适用持续强噪混响）
     std::string gate_mode = "pvad";   // pvad (默认) | asnorm
     std::string denoise = "rnnoise";  // rnnoise (默认) | off
     bool bench_denoise = false;
@@ -52,7 +52,7 @@ struct Args {
     int confirm = 2;
     int window_ms = 500;
     int warmup_frames = 20;   // 流式 warm-up（VAD 语音帧数），--warmup-frames 可调
-    int stream_confirm = 4;   // 流式门控 confirm（压冷启动 blip），--stream-confirm 可调
+    int stream_confirm = 2;   // 流式门控 confirm（v7b 模型默认 2；v4_stream 时代为 4），--stream-confirm 可调
     int seconds = 30;
 };
 
@@ -66,7 +66,7 @@ options:
   --pvad-hyst 0.2     pvad 模式: 低于 threshold-hyst 计数清零
   --pvad-model PATH   pvad.onnx 路径（默认 pvad_v4.onnx）
   --denoise rnnoise   降噪: rnnoise (默认, RNNoise) | off (回滚/对比用)
-  --pvad-stream-model PATH  实时流式模型（默认 pvad_v4_stream.onnx）
+  --pvad-stream-model PATH  实时流式模型（默认 pvad_v7b_stream.onnx）
   --bench-denoise     测降噪单帧耗时后退出
   --bench-stream      实测流式 vs 全段重算单帧耗时后退出
   --threshold 0.55    asnorm no-norm 模式: sA_raw 触发阈值
@@ -115,7 +115,7 @@ Args parse_args(int argc, char** argv) {
         else if (s == "--confirm") a.confirm = std::stoi(next("2"));
         else if (s == "--window-ms") a.window_ms = std::stoi(next("500"));
         else if (s == "--warmup-frames") a.warmup_frames = std::stoi(next("20"));
-        else if (s == "--stream-confirm") a.stream_confirm = std::stoi(next("4"));
+        else if (s == "--stream-confirm") a.stream_confirm = std::stoi(next("2"));
         else if (s == "--long-stream-test") a.long_stream_test = true;
         else if (s == "--seconds") a.seconds = std::stoi(next("30"));
         else if (s == "--vad-model") a.vad_model = next("");
