@@ -685,12 +685,11 @@ int run_tse_smoke(const std::string& root) {
     return 0;
 }
 
-// ---------------- 听故事打断全链验证（--story-test） ----------------
-// TTS 合成中文故事（干扰, 0.45 增益模拟回声）+ voice1b(注册用户全量, 2s 处混入) →
-// 流式 PVAD 守门找触发帧 → 触发帧-0.5s 起切片 → TSE 提取 → PVAD 帧掩码 → ASR。
-// 断言：1) PVAD 在目标混入后触发；2) 故事泄漏率（LCS 字符召回）≤0.15；
-//       3) 对照组（直接 ASR 混合音）泄漏率明显高于提取组；4) voice1b 召回 ≥0.2。
-// 指标标定依据见 USAGE.md 4.5 节扫参表（单麦模拟折损如实记录）。
+// ---------------- 听故事全链验证（--story-test / --direct-asr-test） ----------------
+// TTS 合成中文故事（干扰, 0.45 增益模拟回声）+ voice1b(注册用户全量, 2s 处混入)。
+// story-test 等 INTERRUPT 切片；direct-asr-test 由 VAD 自动收集，不要求触发。
+// direct_v3 复核 → AGC → TSE → ASR（无 PVAD 帧掩码）；断言触发/收集、泄漏对照与目标召回。
+// 指标标定依据见 USAGE.md 4.5 节（单麦模拟折损与无掩码泄漏如实记录）。
 
 #include "pvad_stream.h"
 #include "vad.h"
@@ -744,10 +743,11 @@ double leak_recall(const std::string& ref, const std::string& hyp) {
 }  // namespace
 
 int run_story_test(const std::string& root, const std::string& tts_model_dir,
-                   float story_gain, float mask_thr) {
+                   float story_gain, float mask_thr, bool direct_asr) {
     int fails = 0;
     std::string err;
-    printf("[story-test] === 听故事打断全链（PVAD→TSE→ASR） ===\n");
+    printf("[story-test] === 听故事全链（%s → direct_v3 → TSE → ASR） ===\n",
+           direct_asr ? "VAD自动转写，无需打断" : "PVAD打断");
 
     const std::string kStory =
         "孔融四岁的时候，和哥哥们一起吃梨，他总是拿最小的一个。大人问他为什么，他说我年纪小，"
@@ -821,11 +821,11 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
     std::deque<float> swin;
     bool svad_sp = false;
     int warmup = 20;
-    long trig = -1;   // 触发帧（mix 内帧号）
+    long trig = -1;   // 触发帧（mix 内帧号；direct_asr 模式不依赖它）
+    long coll_start = -1;  // VAD 自动或 INTERRUPT 回滚 0.5s 的收集起点
     long coll_end = -1;  // 收集结束帧（不含）
     int silence_run = 0;   // 连续非语音帧（收集结束判定的 hangover）
     size_t nframes = mix.size() / 160;
-    std::vector<float> pvec(nframes, 0.f);  // 每帧 P(target)（打断后帧掩码用）
     for (size_t i = 0; i < nframes && coll_end < 0; i++) {
         const float* src = &mix[i * 160];
         float vp = vad.process(src, 160);
@@ -838,10 +838,17 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
             }
             svad_sp = sp;
         }
-        // 触发后收集结束判定：连续 0.4s 非语音（hangover 跨过句间停顿）或满 6s
-        if (trig >= 0) {
+        if (direct_asr && coll_start < 0 && sp) {
+            coll_start = i >= 50 ? (long)i - 50 : 0;
+            silence_run = 0;
+            printf("[story-test] direct-ASR VAD collect @ frame %ld（无需 INTERRUPT）\n", coll_start);
+        } else if (!direct_asr && trig >= 0 && coll_start < 0) {
+            coll_start = trig >= 50 ? trig - 50 : 0;
+        }
+        // 收集结束判定：连续 0.4s 非语音或满 6s
+        if (coll_start >= 0) {
             if (!sp) silence_run++; else silence_run = 0;
-            size_t from0 = trig >= 50 ? (size_t)trig - 50 : 0;
+            size_t from0 = (size_t)coll_start;
             if ((silence_run >= 40 || i - from0 >= 600) && i - from0 >= 30) {
                 coll_end = (long)i;
                 break;
@@ -854,7 +861,6 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
         fb.compute_one(w, f80);
         swin.erase(swin.begin(), swin.begin() + 160);
         auto o = stream.push_frame(f80);
-        pvec[i] = o.p;
         if (!o.valid || !o.gated || !sp) continue;  // 与 Engine 一致：会话起始 0.5s 不门控
         if (warmup > 0) { warmup--; continue; }
         bool fire = gate.update(o.p);
@@ -863,15 +869,22 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
             printf("[story-test] INTERRUPT @ frame %ld (t=%.2fs, p=%.3f)\n", trig, i * 0.01, o.p);
         }
     }
-    if (trig < 0) {
+    if (trig < 0 && !direct_asr) {
         printf("STORY pvad-trigger: no interrupt on mix -> FAIL\n");
         return 1;
     }
-    printf("STORY pvad-trigger: frame=%ld t=%.2fs -> PASS\n", trig, trig * 0.01);
-    if (coll_end < 0) coll_end = (long)std::min(nframes, (size_t)trig + 600);
+    if (trig >= 0)
+        printf("STORY pvad-trigger: frame=%ld t=%.2fs -> PASS\n", trig, trig * 0.01);
+    else
+        printf("[story-test] direct-ASR：没有 INTERRUPT 也继续转写\n");
+    if (coll_start < 0) {
+        printf("STORY collect-start: no speech collected -> FAIL\n");
+        return 1;
+    }
+    if (coll_end < 0) coll_end = (long)std::min(nframes, (size_t)coll_start + 600);
 
-    // 4) 切片（触发帧-0.5s 起）→ TSE 提取
-    size_t from = trig >= 50 ? (size_t)trig - 50 : 0;
+    // 4) 切片（VAD/触发帧-0.5s 起）→ direct_v3 复核 → TSE 提取
+    size_t from = (size_t)coll_start;
     std::vector<float> seg(mix.begin() + (ptrdiff_t)from * 160,
                            mix.begin() + (ptrdiff_t)coll_end * 160);
     printf("[story-test] segment %.2fs [%.2fs..%.2fs]\n", seg.size() / 16000.0, from * 0.01,
@@ -904,21 +917,8 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
     write_wav16(root + "/qt_demo/recordings/_tmp_story_seg.wav", seg, 16000);
     write_wav16(root + "/qt_demo/recordings/_tmp_story_ext.wav", ext, 16000);
 
-    // PVAD 帧级掩码（单麦模拟下 TSE 压制有限，用 P(target) 把非目标帧清零，
-    // 保证故事文本不进 ASR）：收集区间内 p<mask_thr 的帧（±1 帧膨胀保留）置零
-    {
-        size_t nf = ext.size() / 160;
-        for (size_t f = 0; f < nf; f++) {
-            size_t af = from + f;
-            float p = af < nframes ? pvec[af] : 0.f;
-            float pl = (af > 0 && af - 1 < nframes) ? pvec[af - 1] : 0.f;
-            float pr = (af + 1 < nframes) ? pvec[af + 1] : 0.f;
-            if (p < mask_thr && pl < mask_thr && pr < mask_thr)
-                std::fill(ext.begin() + (ptrdiff_t)f * 160,
-                          ext.begin() + (ptrdiff_t)(f + 1) * 160, 0.f);
-        }
-    }
-    write_wav16(root + "/qt_demo/recordings/_tmp_story_ext_masked.wav", ext, 16000);
+    // 不做 PVAD 帧掩码：与 Engine 一致，ASR 直接识别 TSE 输出。
+    (void)mask_thr;  // 保留旧命令行参数兼容，不再生效
 
     // 5) ASR 对照
     Asr asr;
@@ -941,9 +941,17 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
         printf("STORY %-40s %s\n", name, cond ? "PASS" : "FAIL");
         if (!cond) fails++;
     };
-    // 触发须落在 voice1b 混入之后（防冷启动 blip 使测试形同虚设）
-    check("pvad-trigger-on-target (2s<t<6s)", trig >= 200 && trig <= 600);
-    check("leak-ext<=0.15 (故事文本不泄漏)", leak_ext <= 0.15);
+    if (direct_asr) {
+        check("direct-asr-collect-before-interrupt",
+              coll_start >= 0 && (trig < 0 || coll_start < trig));
+    } else {
+        // 触发须落在 voice1b 混入之后（防冷启动 blip 使测试形同虚设）
+        check("pvad-trigger-on-target (2s<t<6s)", trig >= 200 && trig <= 600);
+    }
+    if (direct_asr)
+        check("leak-ext<=0.30 (无掩码连续模式)", leak_ext <= 0.30);
+    else
+        check("leak-ext<=0.15 (无掩码打断切片)", leak_ext <= 0.15);
     check("leak-mix>leak-ext+0.1 (对照组明显泄漏)", leak_mix > leak_ext + 0.1);
     // SAPI 弱目标 + 单麦模拟 4ch 折损（USAGE 4.5 如实记录）：线放宽到 0.2
     check("target-recall>=0.2 (ASR 输出含注册用户内容)", tgt_recall >= 0.2);

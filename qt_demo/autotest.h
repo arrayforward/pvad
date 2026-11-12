@@ -23,6 +23,7 @@ int run_agc_test();
 // TSE 链路冒烟（--tse-smoke）：多尺度声纹注册 + e16 step 提取 + ASR 对照
 int run_tse_smoke(const std::string& root);
 
-// 听故事打断全链验证（--story-test）：PVAD 守门 → TSE 提取 → ASR，泄漏率对照断言
+// 听故事全链验证：--story-test 等打断；--direct-asr-test 不等打断、VAD 自动转写
 int run_story_test(const std::string& root, const std::string& tts_model_dir,
-                   float story_gain = 0.45f, float mask_thr = 0.5f);
+                   float story_gain = 0.45f, float mask_thr = 0.5f,
+                   bool direct_asr = false);

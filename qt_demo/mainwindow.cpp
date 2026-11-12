@@ -120,18 +120,26 @@ MainWindow::MainWindow() {
     prob_bar_->setRange(0, 100);
     prob_label_ = new QLabel("P(target)=-", g_state);
     gate_label_ = new QLabel("consec=-", g_state);
+    threshold_spin_ = new QDoubleSpinBox(g_state);
+    threshold_spin_->setRange(0.05, 0.95);
+    threshold_spin_->setDecimals(2);
+    threshold_spin_->setSingleStep(0.05);
+    threshold_spin_->setValue(0.50);
+    threshold_spin_->setPrefix("阈值 ");
+    threshold_spin_->setToolTip("P(target) 连续 2 帧超过该阈值才打断；实时修改立即复位门控计数");
     h4->addWidget(prob_bar_, 1);
     h4->addWidget(prob_label_);
     h4->addWidget(gate_label_);
+    h4->addWidget(threshold_spin_);
     vbox->addWidget(g_state);
 
-    // 打断转写区（TSE 提取注册用户声音 → ASR；单麦模拟 4ch，无空间信息，分离效果有折损）
-    auto* g_asr = new QGroupBox("打断转写（TSE+ASR，单麦模拟）", this);
+    // 连续转写区（VAD 自动分段，无需打断；TSE 提取注册用户声音 → ASR）
+    auto* g_asr = new QGroupBox("连续转写（无需打断，direct_v3+TSE+ASR）", this);
     auto* h5 = new QHBoxLayout(g_asr);
     asr_box_ = new QCheckBox("仅保留注册用户声音", g_asr);
     asr_edit_ = new QLineEdit(g_asr);
     asr_edit_->setReadOnly(true);
-    asr_edit_->setPlaceholderText("打断后在此显示用户语音的识别结果（TTS 文本不会进入此区）");
+    asr_edit_->setPlaceholderText("检测到语音后在此显示识别结果，无需打断（TTS 文本不会进入此区）");
     keep_label_ = new QLabel("", g_asr);
     h5->addWidget(asr_box_);
     h5->addWidget(asr_edit_, 1);
@@ -203,6 +211,10 @@ MainWindow::MainWindow() {
         QMetaObject::invokeMethod(engine_, "setDenoiseEnabled", Qt::QueuedConnection, Q_ARG(bool, on));
     });
     denoise_box_->setChecked(true);  // 降噪默认开（触发 toggled -> engine 创建 Denoise）
+    connect(threshold_spin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        QMetaObject::invokeMethod(engine_, "setPvadThreshold", Qt::QueuedConnection,
+                                  Q_ARG(double, value));
+    });
     connect(story_combo_, &QComboBox::activated, this, [this](int idx) {
         if (idx > 0) text_edit_->setText(story_combo_->itemData(idx).toString());
     });
@@ -222,12 +234,16 @@ MainWindow::MainWindow() {
     connect(engine_, &Engine::probUpdate, this, [this](float p, int consec) {
         prob_bar_->setValue(int(p * 100));
         prob_label_->setText(QString("P(target)=%1").arg(p, 0, 'f', 3));
-        gate_label_->setText(QString("consec=%1").arg(consec));
+        if (!interrupt_ui_latched_) gate_label_->setText(QString("consec=%1").arg(consec));
     });
     connect(engine_, &Engine::interruptFired, this, [this](double t) {
+        interrupt_ui_latched_ = true;
         gate_label_->setText(QString("INTERRUPT @ %1s").arg(t, 0, 'f', 2));
         gate_label_->setStyleSheet("color: red; font-weight: bold;");
-        QTimer::singleShot(2000, this, [this]() { gate_label_->setStyleSheet(""); });
+        QTimer::singleShot(2000, this, [this]() {
+            gate_label_->setStyleSheet("");
+            interrupt_ui_latched_ = false;
+        });
     });
     connect(engine_, &Engine::playbackChanged, this, [this](bool playing) {
         tts_label_->setText(playing ? "播放中" : "空闲");

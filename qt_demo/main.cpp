@@ -53,6 +53,14 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);  // 无头回归异常退出时保留最后进度
     QStringList args;
     for (int i = 0; i < argc; i++) args << QString::fromLocal8Bit(argv[i]);
+    // GUI 与无头测试统一走运行时路径；发布包由 run_demo.bat 设置为包目录。
+    // 统一正斜杠，旧格式持久化测试会把绝对 wav 路径写入 JSON。
+    QString root_q = qEnvironmentVariable("DEMO_ROOT", DEMO_ROOT);
+    root_q.replace('\\', '/');
+    const std::string runtime_root = root_q.toStdString();
+    QString tts_q = qEnvironmentVariable("TTS_MODEL_DIR", TTS_MODEL_DIR);
+    tts_q.replace('\\', '/');
+    const std::string runtime_tts_dir = tts_q.toStdString();
 
     if (args.contains("--probe-audio")) return probe_audio();
 
@@ -64,21 +72,21 @@ int main(int argc, char** argv) {
             int v = args[idx + 1].toInt(&ok);
             if (ok && v > 0) secs = v;
         }
-        return run_record_test(DEMO_ROOT, secs);
+        return run_record_test(runtime_root, secs);
     }
 
-    if (args.contains("--wizard-test")) return run_wizard_test(DEMO_ROOT);
+    if (args.contains("--wizard-test")) return run_wizard_test(runtime_root);
 
-    if (args.contains("--persist-test")) return run_persist_test(DEMO_ROOT);
+    if (args.contains("--persist-test")) return run_persist_test(runtime_root);
 
     if (args.contains("--ui-state-test")) return run_ui_state_test();
 
     if (args.contains("--agc-test")) return run_agc_test();
 
-    if (args.contains("--tse-smoke")) return run_tse_smoke(DEMO_ROOT);
+    if (args.contains("--tse-smoke")) return run_tse_smoke(runtime_root);
 
-    if (args.contains("--story-test")) {
-        std::string tts_dir = TTS_MODEL_DIR;
+    if (args.contains("--story-test") || args.contains("--direct-asr-test")) {
+        std::string tts_dir = runtime_tts_dir;
         int idx = args.indexOf("--tts-model");
         if (idx >= 0 && idx + 1 < args.size()) tts_dir = args[idx + 1].toStdString();
         float sg = 0.45f;
@@ -87,18 +95,17 @@ int main(int argc, char** argv) {
         float mt = 0.5f;
         int mi = args.indexOf("--mask-thr");
         if (mi >= 0 && mi + 1 < args.size()) mt = args[mi + 1].toFloat();
-        return run_story_test(DEMO_ROOT, tts_dir, sg, mt);
+        return run_story_test(runtime_root, tts_dir, sg, mt, args.contains("--direct-asr-test"));
     }
 
     if (args.contains("--auto-test")) {
-        std::string root = DEMO_ROOT;
-        std::string tts_dir = TTS_MODEL_DIR;
+        std::string tts_dir = runtime_tts_dir;
         bool use_denoise = true;
         int idx = args.indexOf("--tts-model");
         if (idx >= 0 && idx + 1 < args.size()) tts_dir = args[idx + 1].toStdString();
         int di = args.indexOf("--denoise");
         if (di >= 0 && di + 1 < args.size()) use_denoise = (args[di + 1] != "off");
-        return run_auto_test(root, tts_dir, use_denoise);
+        return run_auto_test(runtime_root, tts_dir, use_denoise);
     }
 
     QApplication app(argc, argv);

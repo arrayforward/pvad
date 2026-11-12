@@ -43,7 +43,8 @@ public slots:
     void startWizard();                   // 引导注册：备份旧注册并开始 3 段向导
     void cancelWizard();                  // 引导注册：取消并恢复旧注册
     void setDenoiseEnabled(bool on);      // 监听降噪（RNNoise），默认关
-    void setAsrEnabled(bool on);          // [仅保留注册用户声音]：打断后 TSE+ASR 出字
+    void setPvadThreshold(double threshold);  // 实时 P(target) 阈值，麦克风/WAV 注入均生效
+    void setAsrEnabled(bool on);          // [仅保留注册用户声音]：VAD 自动分段转写
 
 signals:
     void logLine(QString);
@@ -122,13 +123,12 @@ private:
     bool svad_speech_ = false;            // 上一帧 VAD 语音判定
     int warmup_left_ = 20;                // 会话（分段）起始 warm-up VAD 帧数
 
-    // ---- 打断后 TSE+ASR 链（听故事打断演示） ----
+    // ---- VAD 自动分段转写链（无需 INTERRUPT；打断仅停止 TTS） ----
     std::unique_ptr<TseSpeakerEncoder> tse_enc_;   // 多尺度 4288 编码器
     std::vector<float> tse_emb_;                   // 注册声纹（4288 维均值）
     std::unique_ptr<DirectGate> direct_gate_;      // v7b 触发后的 direct_v3 句级复核
     std::vector<float> direct_ref_;                // 原始电平注册 deep-192 均值
     std::deque<float> hist_;                       // 监听中 post-denoise 音频环形缓冲（封顶 8s）
-    std::deque<float> pvec_;                       // 与 hist_ 对齐的每帧 P(target)（帧掩码用）
     size_t hist_base_frame_ = 0;                   // hist_.front() 对应的绝对帧号
     size_t mic_frame_ = 0;                         // 本次监听已入 hist_ 的绝对帧计数
     bool collecting_ = false;                      // 打断后收集中

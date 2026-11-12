@@ -2,6 +2,7 @@
 #pragma once
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
@@ -57,10 +58,12 @@ private:
     QProgressBar* prob_bar_;
     QLabel* prob_label_;
     QLabel* gate_label_;
-    // 打断转写（TSE+ASR，仅注册用户声音）
+    QDoubleSpinBox* threshold_spin_;
+    // 连续转写（VAD 自动分段，direct_v3+TSE+ASR，仅注册用户声音）
     QCheckBox* asr_box_;
     QLineEdit* asr_edit_;
     QLabel* keep_label_;
+    bool interrupt_ui_latched_ = false;  // INTERRUPT 至少显示 2s，不被下一帧 consec 覆盖
     QPlainTextEdit* log_edit_;
     QString inject_wav_;
     UiState ui_;

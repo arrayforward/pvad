@@ -82,6 +82,9 @@ public:
     // 故流式模式做 0.5s warm-up（期间报数但不更新门控）。
     bool precompute_file(const float* pcm, size_t n, std::string& err);
     void reset_stream();   // 清空流与门控（换注入源/重新监听时调用）
+    void set_gate_threshold(float threshold) {
+        gate_ = PvadGate{threshold, 0.2f, 2};  // 实时配置立即生效，清除旧计数/触发态
+    }
     double now() const { return frame_idx_ * 0.01; }
 
 private:

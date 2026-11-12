@@ -191,12 +191,12 @@ qt_demo 的 `enrollment/tpl.bin` 与 CLI `enroll` 产物完全同格式，双向
 ## 7. TSE 支路与电平校准契约
 
 ```
-mic ─► RNNoise ─┬► PVAD v7b_stream（原始 post-RNNoise 电平，不做 AGC）─► INTERRUPT
+mic ─► RNNoise ─┬► PVAD v7b_stream（阈值 UI 实时可调）─► INTERRUPT ─► 仅停止 TTS
                 ├► LevelMeter（每 1s 报 RMS/active RMS/peak）
-                └► 8s 回放缓冲 ─► 打断切片 ─► direct_v3 TH=0.0 句级复核
-                                      │ 放行（不确定也放行；关闭不撤销打断）
+                └► 8s 回放缓冲 ─► VAD 自动分段（无需 INTERRUPT）─► direct_v3 TH=0.0 复核
+                                      │ 放行（不确定也放行；关闭不影响打断状态）
                                       ▼
-                              恒定增益校准 ─► TSE ─► PVAD 帧掩码 ─► ASR
+                              恒定增益校准 ─► TSE ─► ASR（无 PVAD 帧掩码）
 
 注册 wav ─┬► 恒定增益校准 ─► 多尺度编码器 ─► 4288 维 TSE 嵌入（不做向量 L2 归一化）
           └► 原始电平 ─► 多尺度编码器 ─► deep-192 direct_v3 引用（懒计算缓存）

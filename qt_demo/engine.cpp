@@ -32,7 +32,10 @@ void Engine::playback_cb(ma_device* dev, void* out, const void*, ma_uint32 frame
     }
     pos += frames;
     e->playpos_.store(pos);
-    if (pos >= n) e->playing_.store(false);
+    if (pos >= n && e->playing_.exchange(false)) {
+        // 音频线程 -> GUI 队列信号，避免播完后内部已空闲但 UI 仍显示播放中。
+        emit e->playbackChanged(false);
+    }
 }
 
 Engine::Engine(QObject* parent) : QObject(parent) {}
@@ -101,7 +104,7 @@ void Engine::init() {
         if (core_.enrolled() && ensureTseEmb()) persistEnrollment();
     } catch (const std::exception& e) {
         tse_enc_.reset();
-        emit logLine("TSE 声纹编码器加载失败（打断转写不可用）: " + QString::fromStdString(e.what()));
+        emit logLine("TSE 声纹编码器加载失败（连续转写不可用）: " + QString::fromStdString(e.what()));
     }
     try {
         direct_gate_ = std::make_unique<DirectGate>(
@@ -109,7 +112,7 @@ void Engine::init() {
         emit logLine("句级二级复核已加载（direct_v3 TH=0.0，不确定区放行）");
     } catch (const std::exception& e) {
         direct_gate_.reset();
-        emit logLine("二级复核加载失败（仅跳过复核，不影响打断转写）: " + QString::fromStdString(e.what()));
+        emit logLine("二级复核加载失败（仅跳过复核，不影响连续转写）: " + QString::fromStdString(e.what()));
     }
     {
         asr_ = std::make_unique<Asr>();
@@ -119,7 +122,7 @@ void Engine::init() {
             emit logLine("ASR 已加载 (" + asr_dir + ")");
         else {
             asr_.reset();
-            emit logLine("ASR 加载失败（打断转写不可用）: " + QString::fromStdString(e));
+            emit logLine("ASR 加载失败（连续转写不可用）: " + QString::fromStdString(e));
         }
     }
     QString tts_dir = qEnvironmentVariable("TTS_MODEL_DIR", TTS_MODEL_DIR);
@@ -203,7 +206,7 @@ bool Engine::ensureTseEmb() {
         }
     }
     if (failed > 0)
-        emit logLine(QString("警告：%1 段注册无法补算 TSE 声纹（录音已删？），打断转写将降级").arg(failed));
+        emit logLine(QString("警告：%1 段注册无法补算 TSE 声纹（录音已删？），连续转写将降级").arg(failed));
     // 均值（所有有 tse_emb 的段）
     tse_emb_.assign(TseSpeakerEncoder::EMB_DIM, 0.f);
     int n = 0;
@@ -262,8 +265,8 @@ bool Engine::ensureDirectRef() {
 void Engine::setAsrEnabled(bool on) {
     asr_enabled_ = on;
     if (on && (!tse_enc_ || !asr_ || tse_emb_.empty()))
-        emit logLine("注意：TSE/ASR 未就绪或未注册，打断转写不会生效");
-    emit logLine(on ? "打断转写已开启（TSE 提取 → ASR，仅注册用户声音）" : "打断转写已关闭");
+        emit logLine("注意：TSE/ASR 未就绪或未注册，连续转写不会生效");
+    emit logLine(on ? "连续转写已开启（TSE 提取 → ASR，仅注册用户声音）" : "连续转写已关闭");
 }
 
 // 收集结束：hist_ 切片（触发帧-0.5s 起）→ TSE 提取 → ASR → asrText
@@ -281,7 +284,7 @@ void Engine::finalizeCollect() {
     std::vector<float> seg(hist_.begin() + (ptrdiff_t)off, hist_.end());
     double sec = seg.size() / 16000.0;
     if (seg.size() < 16000 / 2) {
-        emit logLine(QString("打断语音太短（%1s），跳过转写").arg(sec, 0, 'f', 2));
+        emit logLine(QString("转写片段太短（%1s），跳过转写").arg(sec, 0, 'f', 2));
         return;
     }
     // v7b 已负责快速打断；direct_v3 只复核是否把本段送入 TSE/ASR，绝不撤销用户打断。
@@ -295,7 +298,7 @@ void Engine::finalizeCollect() {
                          .arg(review.closed ? "关闭本段转写" : "放行"));
             if (review.closed) {
                 emit keepRatio(0.0);
-                emit asrText("");
+                // 不用空文本覆盖上一句有效识别。
                 emit logLine("二级复核关闭：本段不进入 TSE/ASR（已发生的用户打断不撤销）");
                 return;
             }
@@ -303,7 +306,7 @@ void Engine::finalizeCollect() {
             emit logLine("二级复核异常，按放行降级: " + QString::fromStdString(e.what()));
         }
     }
-    emit logLine(QString("打断转写：截取 %1s，TSE 提取中（单麦模拟 4ch）...").arg(sec, 0, 'f', 2));
+    emit logLine(QString("连续转写：截取 %1s，TSE 提取中（单麦模拟 4ch）...").arg(sec, 0, 'f', 2));
     QString root = qEnvironmentVariable("DEMO_ROOT", DEMO_ROOT);
     std::vector<float> ext;
     try {
@@ -320,24 +323,15 @@ void Engine::finalizeCollect() {
     }
     emit keepRatio(seg.empty() ? 0.0 : (double)ext.size() / (double)seg.size());
     if (ext.empty()) { emit logLine("TSE 提取为空"); return; }
-    // PVAD 帧级掩码：单麦模拟下 TSE 压制有限，用 P(target) 把非目标帧清零
-    // （阈值 0.5，±1 帧膨胀保留），保证 TTS 文本不进 ASR 区
-    {
-        size_t nf = ext.size() / 160;
-        for (size_t f = 0; f < nf; f++) {
-            size_t af = start_frame + f;  // 绝对帧号（与 pvec_ 对齐）
-            long k0 = (long)af - (long)hist_base_frame_;
-            float p  = (k0 >= 0 && k0 < (long)pvec_.size()) ? pvec_[k0] : 0.f;
-            float pl = (k0 - 1 >= 0 && k0 - 1 < (long)pvec_.size()) ? pvec_[k0 - 1] : 0.f;
-            float pr = (k0 + 1 >= 0 && k0 + 1 < (long)pvec_.size()) ? pvec_[k0 + 1] : 0.f;
-            if (p < 0.5f && pl < 0.5f && pr < 0.5f)
-                std::fill(ext.begin() + (ptrdiff_t)f * 160,
-                          ext.begin() + (ptrdiff_t)(f + 1) * 160, 0.f);
-        }
-    }
+    // 不做 PVAD 帧掩码：ASR 直接识别 TSE 输出，避免低分目标帧被整段清零。
     std::string text = asr_->decode(ext.data(), (int)ext.size());
     emit logLine(QString("ASR 完成：%1").arg(QString::fromStdString(text)));
-    emit asrText(QString::fromStdString(text));
+    if (!text.empty()) {
+        emit asrText(QString::fromStdString(text));
+    } else {
+        // 连续监听中的空结果（如纯 TTS/噪声段）不清空上一句有效识别。
+        emit logLine("本段 ASR 为空，保留上一句有效结果");
+    }
 }
 
 bool Engine::openPlayback(int sample_rate) {
@@ -374,6 +368,10 @@ void Engine::speakText(QString text) {
         std::lock_guard<std::mutex> lk(mu_);
         playbuf_ = std::move(pcm);
     }
+    // 新一次播放允许再次打断；否则 PvGate 上次 triggered 必须等 P<0.3 才复位，
+    // 用户重播后会看到门控仍在动却不再触发。
+    sgate_.reset();
+    interrupt_latched_ = false;
     playpos_.store(0);
     if (openPlayback(16000)) {
         playing_.store(true);
@@ -433,7 +431,6 @@ void Engine::startListenMic() {
     refreshStreamEnroll();
     interrupt_latched_ = false;
     hist_.clear();
-    pvec_.clear();
     hist_base_frame_ = 0;
     mic_frame_ = 0;
     collecting_ = false;
@@ -576,6 +573,14 @@ void Engine::clearEnroll() {
     emit logLine("已清空注册（enrollment/ 文件已删除，recordings/ 录音保留）");
 }
 
+void Engine::setPvadThreshold(double threshold) {
+    float thr = (float)threshold;
+    core_.set_gate_threshold(thr);
+    sgate_ = PvadGate{thr, 0.2f, 2};
+    emit logLine(QString("PVAD 门控阈值已实时更新为 %1（连续 2 帧，计数已复位）")
+                 .arg(thr, 0, 'f', 2));
+}
+
 void Engine::setDenoiseEnabled(bool on) {
     if (on && !denoise_) {
         try {
@@ -694,14 +699,12 @@ void Engine::tick() {
             level_meter_.reset();
             last_level_log_ms_ = level_now;
         }
-        // 打断转写用回放缓冲：post-denoise 采样入 hist_（封顶 8s，8s=800 帧）
+        // 连续转写用回放缓冲：post-denoise 采样入 hist_（封顶 8s，8s=800 帧）
         if (asr_enabled_) {
             for (int i = 0; i < 160; i++) hist_.push_back(src[i]);
-            pvec_.push_back(0.f);
             mic_frame_++;
             while (hist_.size() > 16000 * 8) {
                 for (int i = 0; i < 160; i++) hist_.pop_front();
-                pvec_.pop_front();
                 hist_base_frame_++;
             }
         }
@@ -718,14 +721,23 @@ void Engine::tick() {
             }
             svad_speech_ = sp;
         }
-        // 打断后收集结束判定：连续 0.4s 非语音（hangover 跨句间停顿）或满 6s
+        // 连续转写：VAD 检测到语音即开始收集，不等待 INTERRUPT。
+        // PVAD 打断只负责停止 TTS，与本转写状态机相互独立。
+        if (asr_enabled_ && !collecting_ && sp && tse_enc_ && asr_ && !tse_emb_.empty()) {
+            collecting_ = true;
+            silence_run_ = 0;
+            collect_from_ = mic_frame_ >= 50 ? mic_frame_ - 50 : hist_base_frame_;
+            if (collect_from_ < hist_base_frame_) collect_from_ = hist_base_frame_;
+            emit logLine("连续转写：检测到语音，开始收集（无需打断，VAD 静音或 6s 截止）");
+        }
+        // 收集结束判定：连续 0.4s 非语音（hangover 跨句间停顿）或满 6s
         // （须在 !sp continue 之前检查）
         if (collecting_) {
             if (!sp) silence_run_++; else silence_run_ = 0;
             bool end = silence_run_ >= 40 || (mic_frame_ - collect_from_ >= 600);
             if (end) {
                 if (mic_frame_ - collect_from_ >= 30) finalizeCollect();
-                else { collecting_ = false; emit logLine("打断语音太短，取消转写"); }
+                else { collecting_ = false; emit logLine("转写片段太短，取消转写"); }
             }
         }
         // 流式 PVAD：单帧 fbank（对齐 480 窗）+ chunk GRU 增量推理，每帧 O(1)
@@ -736,7 +748,6 @@ void Engine::tick() {
         sfbank_.compute_one(w, f80);
         swin_.erase(swin_.begin(), swin_.begin() + 160);
         auto o = stream_->push_frame(f80);
-        if (asr_enabled_ && !pvec_.empty()) pvec_.back() = o.p;
         // !o.gated = 会话起始 0.5s warm-up（PvadStream 自带）：压会话冷启动 blip
         // （EMA/GRU 暂态会让首个语音段前 ~0.4s 的 P 虚高过阈，story-test 复现）
         if (!o.valid || !o.gated || !sp) continue;
@@ -773,7 +784,7 @@ void Engine::handleEvent(const FrameEvent& ev) {
         emit interruptFired(ev.t);
         emit logLine(QString(">>> INTERRUPT @ %1s (P=%2)").arg(ev.t, 0, 'f', 2).arg(ev.p, 0, 'f', 3));
         if (playing_.load()) stopPlayback();
-        // 打断转写：从触发帧-0.5s 起收集用户语音（仅麦克风路径；注入模式跳过）
+        // 兜底：正常已由 VAD 自动收集；若尚未开始，则在触发帧-0.5s 补启动（注入模式跳过）
         if (asr_enabled_ && !collecting_ && !inject_mode_ &&
             tse_enc_ && asr_ && !tse_emb_.empty()) {
             collecting_ = true;
@@ -781,7 +792,7 @@ void Engine::handleEvent(const FrameEvent& ev) {
             interrupt_frame_ = mic_frame_;
             collect_from_ = mic_frame_ >= 50 ? mic_frame_ - 50 : hist_base_frame_;
             if (collect_from_ < hist_base_frame_) collect_from_ = hist_base_frame_;
-            emit logLine("打断转写：开始收集语音（VAD 静音或 6s 截止）");
+            emit logLine("连续转写：开始收集语音（VAD 静音或 6s 截止）");
         }
     }
 }

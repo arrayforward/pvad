@@ -22,10 +22,12 @@ TTS 时**只有已注册用户 A 的语音可以打断播放**——TTS 自身�
 - **工具链**：enroll（注册/批量注册）、score（打分）、double_voice（离线/实时/批量回归管线）、
   pvad_demo（Qt6 图形 demo：引导式三段注册向导、TTS 朗读、麦克风/WAV 注入监听、
   `--auto-test`/`--wizard-test`/`--record-test`/`--probe-audio` 无头验证）
-- **听故事打断演示（qt_demo）**：PVAD v7b 快速守门触发后，先由 **direct_v3 TH=0.0**
-  做高召回句级复核（不确定区放行，不撤销用户打断），再由 e16 TSE（单麦模拟 4ch）
-  提取注册用户声音，sherpa-onnx Paraformer-zh ASR 出字上屏——TTS 文本不进识别区；
-  无头回归 `--story-test`（泄漏率对照断言，见 [docs/USAGE.md](docs/USAGE.md) 4.5 节）
+- **连续转写与听故事演示（qt_demo）**：VAD 检测到语音即自动分段，**无需 INTERRUPT**；
+  PVAD v7b 只独立控制 TTS 打断（界面阈值 0.05~0.95 实时可调）。每段先由
+  **direct_v3 TH=0.0** 高召回复核（不确定区放行），再由 e16 TSE（单麦模拟 4ch）提取
+  注册用户声音，sherpa-onnx Paraformer-zh ASR 出字。**ASR 直接识别 TSE 输出，不再使用
+  PVAD 帧掩码**；空识别不会清空上一句有效结果。无头回归 `--story-test` /
+  `--direct-asr-test`（见 [docs/USAGE.md](docs/USAGE.md) 4.5 节）
 - **TSE 输入电平校准**：麦克风每秒记录 RMS/有效语音 RMS/峰值；注册与提取切片以
   **恒定增益**校准有效语音 RMS 到 **0.045（−26.9dBFS）**，限增益 0.1~12、峰值 0.95，
   不做会损伤 GRU 状态的动态逐帧 AGC，也不改变 PVAD 门控输入。`--agc-test` 可无头验证
