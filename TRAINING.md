@@ -296,6 +296,35 @@ D: 盘剩余空间有限。若需释放空间，**先 `du -sh` 列出占用并�
 > 其余勿动。解压中间产物放 `data/_tmp_extract/`（约 25G，`_tmp` 前缀，用完即删），
 需要时从 `data/raw` 重新解压即可。
 
+### 重建记录（2026-11-12，数据误删后全量重建）
+
+数据曾整体被误删，后迁移至 `D:/ai-app/pvad-data/` 并全量重建
+（管线脚本：`scripts/_tmp_rebuild_pipeline.sh` → `_tmp_rebuild_pipeline2.sh` →
+`_tmp_rebuild_pipeline3.sh`，分三段，中断原因均为脚本 bug 而非数据问题）。
+重建结果与历史基线一致：
+
+- speakers：1139 人 / 294,892 条 / 388.1h（aishell 400/179.4h、primewords
+  296/99.0h、stcmds 443/109.7h），与历史逐数字相同；split.json 沿用原文件
+- mixtures v1/v2 全量（train 19000/val 2500/test 2500，同种子 3003/1001/2002）、
+  v3（+双干扰 700/90/90）、v4（train 19263 条：易混淆 2000+双干扰 700+随机 2116，
+  负样本 25%）、mixtures_long（3500/300/300）全部重建
+- **注意：重建的混合物与历史不是逐条相同的样本**。manifest 行序变了
+  （prepare_corpus 语料处理顺序不同），同一种子下 rng 抽样序列不同，
+  得到的是同分布的新样本。因此 test 集上的历史 e2e 数值不可逐点复现，
+  只能按分布对齐验证：
+  - 帧级（best_v4，干净 test 2500 条）：FAR 0.215 / recall 0.932
+    （历史 0.210 / 0.940，差 <1pp ✓）
+  - python e2e（best_v4，500 条）：92.6%（历史 94.0%，-1.4pp ✓）
+  - C++ 回归（pvad_v4+rnnoise，200 条）：94.0%（历史 97.5%，差异为
+    样本重抽 + C++/python 口径差；帧级证据表明分布等价）
+  - 长流（pvad_v4_stream，test 300 条）：目标段召回 17.6%（历史 19%）、
+    纯负流零触发 2.5%（历史 2.5%，逐数字相同 ✓）
+- **坑：`build/grid_tpl/` 下的 enroll 模板缓存按 mix id 命名**，数据重建后
+  id 不变但 enrollment 内容变了，直接复用旧模板会让 C++ 回归虚低 5pp。
+  换数据后跑 `run_regression_cell.py` 必须加 `--tag` 换新缓存目录
+  （本次用 `--tag rebuild_test`；旧的 `grid_tpl/mixtures_test` 是 8 月的
+  陈旧模板，未删，留作对照）。
+
 ## 8. 已知问题与下一步
 
 1. **checkpoint 选择准则**：val F1 偏 recall，改 F1−λ·FAR 联合选模（最高优先级，
