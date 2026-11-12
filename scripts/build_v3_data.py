@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, load_labels, read_wav  # noqa: E402
+from pvad_common import ROOT, load_labels, read_wav, DATA_ROOT, data_path  # noqa: E402
 
 SPLITS = {"train": 19000, "val": 2500, "test": 2500}
 HARD_NEG = {"train": 700, "val": 90, "test": 90}  # 预留给双干扰硬负例的配额
@@ -36,7 +36,7 @@ def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--enroll-rir-prob", type=float, default=0.5)
-    ap.add_argument("--rir-dir", default=str(ROOT / "data" / "raw" / "aug"
+    ap.add_argument("--rir-dir", default=str(DATA_ROOT / "raw" / "aug"
                                              / "RIRS_NOISES" / "simulated_rirs"))
     ap.add_argument("--seed", type=int, default=777)
     args = ap.parse_args()
@@ -54,7 +54,7 @@ def main():
             from pvad_common import CampplusEmbedder
             embedder = CampplusEmbedder(intra_threads=4)
             rir_files = sorted(Path(args.rir_dir).rglob("*.wav"))
-        pcm, _ = read_wav(ROOT / rec["enrollment"])
+        pcm, _ = read_wav(data_path(rec["enrollment"]))
         rp = rng.choice(rir_files)
         rir, _ = read_wav(rp)
         peak = np.max(np.abs(rir))
@@ -68,15 +68,15 @@ def main():
         return True
 
     for split, total in SPLITS.items():
-        out_dir = ROOT / "data" / "mixtures_v3" / split
+        out_dir = DATA_ROOT / "mixtures_v3" / split
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "feats").mkdir(exist_ok=True)
         (out_dir / "emb").mkdir(exist_ok=True)
         n_base = total - HARD_NEG[split]
         per_src = n_base // 2
         merged = []
-        for src_name, src_dir in (("v1", ROOT / "data" / "mixtures" / split),
-                                  ("v2", ROOT / "data" / "mixtures_v2" / split)):
+        for src_name, src_dir in (("v1", DATA_ROOT / "mixtures" / split),
+                                  ("v2", DATA_ROOT / "mixtures_v2" / split)):
             recs = load_labels(src_dir / "labels.jsonl")
             rng.shuffle(recs)
             for r in recs[:per_src]:

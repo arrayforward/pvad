@@ -18,6 +18,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# 数据根已迁出项目目录 (防误删护栏, 见 AGENTS.md)
+import os
+DATA_ROOT = Path(os.environ.get("PVAD_DATA_ROOT", "D:/ai-app/pvad-data"))
 TOL = 20
 
 
@@ -35,7 +38,7 @@ def judge(trig, overlaps, labels):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-n", type=int, default=50)
-    ap.add_argument("--test-dir", default=str(ROOT / "data" / "mixtures" / "test"))
+    ap.add_argument("--test-dir", default=str(DATA_ROOT / "mixtures" / "test"))
     ap.add_argument("--denoise", default=None, choices=[None, "off", "rnnoise"],
                     help="透传给 double_voice 的 --denoise（默认不传=off）")
     ap.add_argument("--pvad-model", default=None)

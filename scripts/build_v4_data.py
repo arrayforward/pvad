@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, load_labels  # noqa: E402
+from pvad_common import ROOT, load_labels, DATA_ROOT  # noqa: E402
 
 # split -> (从 v3 取的条数, 预留易混淆负样本数)
 PLAN = {"train": (19000, 2000), "val": (2350, 150)}
@@ -32,8 +32,8 @@ def link(src: Path, dst: Path):
 def main():
     rng = random.Random(888)
     for split, (n_base, n_conf) in PLAN.items():
-        src_dir = ROOT / "data" / "mixtures_v3" / split
-        out_dir = ROOT / "data" / "mixtures_v4" / split
+        src_dir = DATA_ROOT / "mixtures_v3" / split
+        out_dir = DATA_ROOT / "mixtures_v4" / split
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "feats").mkdir(exist_ok=True)
         (out_dir / "emb").mkdir(exist_ok=True)

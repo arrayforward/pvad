@@ -24,6 +24,7 @@
 """
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
@@ -32,9 +33,16 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-EXTRACTED = ROOT / "data" / "extracted"
-SPEAKERS_OUT = ROOT / "data" / "speakers"
-MANIFEST = ROOT / "data" / "manifest.jsonl"
+# 数据根已迁出项目目录 (防误删护栏, 见 AGENTS.md)
+DATA_ROOT = Path(os.environ.get("PVAD_DATA_ROOT", "D:/ai-app/pvad-data"))
+EXTRACTED = DATA_ROOT / "_tmp_extract"   # 解压中间产物, 重建后可删 (AGENTS.md 允许)
+SPEAKERS_OUT = DATA_ROOT / "speakers"
+MANIFEST = DATA_ROOT / "manifest.jsonl"
+
+
+def manifest_rel(p: Path) -> str:
+    """数据根下的绝对路径 → manifest 相对路径 ('data/...')。"""
+    return "data/" + str(Path(p).relative_to(DATA_ROOT)).replace("\\", "/")
 MIN_DUR = 0.5
 TARGET_SR = 16000
 
@@ -147,7 +155,7 @@ def process_one(args):
     return {
         "corpus": corpus,
         "speaker": spk_of(corpus, rel),
-        "path": str(out.relative_to(ROOT)).replace("\\", "/"),
+        "path": manifest_rel(out),
         "duration_s": round(dur, 3),
     }
 
@@ -168,7 +176,7 @@ def run_stcmds_parquet():
     """从 ModelScope 镜像的 parquet 分片解码 ST-CMDS。
     文件名 20170001P00338A0110.wav -> 说话人 P00338。"""
     import io
-    pq_dir = ROOT / "data" / "raw" / "ms_stcmds" / "data"
+    pq_dir = DATA_ROOT / "raw" / "ms_stcmds" / "data"
     shards = sorted(pq_dir.glob("*.parquet"))
     if not shards:
         return None
@@ -207,7 +215,7 @@ def run_stcmds_parquet():
             records.append({
                 "corpus": "stcmds",
                 "speaker": spk,
-                "path": str(out.relative_to(ROOT)).replace("\\", "/"),
+                "path": manifest_rel(out),
                 "duration_s": round(dur, 3),
             })
         print(f"[stcmds] 分片 {si + 1}/{len(shards)} 累计 {len(records)} 条")
@@ -264,7 +272,7 @@ def run_corpus(corpus: str, workers: int = 8):
             records.append({
                 "corpus": corpus,
                 "speaker": w.parent.name,
-                "path": str(w.relative_to(ROOT)).replace("\\", "/"),
+                "path": manifest_rel(w),
                 "duration_s": round(dur, 3),
             })
     return records

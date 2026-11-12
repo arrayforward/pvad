@@ -17,7 +17,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, load_labels  # noqa: E402
+from pvad_common import ROOT, load_labels, DATA_ROOT  # noqa: E402
 
 FEAT_DIM = 80
 EMB_DIM = 192
@@ -419,8 +419,8 @@ def evaluate(model, loader, class_weight):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--train-dir", default=str(ROOT / "data" / "mixtures" / "train"))
-    ap.add_argument("--val-dir", default=str(ROOT / "data" / "mixtures" / "val"))
+    ap.add_argument("--train-dir", default=str(DATA_ROOT / "mixtures" / "train"))
+    ap.add_argument("--val-dir", default=str(DATA_ROOT / "mixtures" / "val"))
     ap.add_argument("--out-dir", default=str(ROOT / "models" / "pvad"))
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--batch", type=int, default=32)

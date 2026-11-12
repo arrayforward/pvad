@@ -20,7 +20,7 @@ import numpy as np
 import onnxruntime as ort
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, fbank, read_wav, load_labels, CampplusEmbedder  # noqa: E402
+from pvad_common import ROOT, fbank, read_wav, load_labels, CampplusEmbedder, DATA_ROOT, data_path  # noqa: E402
 
 CHUNK = 5
 CONFIRM = 4          # 与生产流式门控一致
@@ -195,8 +195,8 @@ def eval_long(td, sess, embder, cfg, max_n, baseline=False):
     seg_hit = {2: 0, 1: 0, 0: 0}
     pn_streams = pn_clean = 0
     for r in recs:
-        pcm, _ = read_wav(ROOT / r["path"])
-        epcm, _ = read_wav(ROOT / r["enrollment"])
+        pcm, _ = read_wav(data_path(r["path"]))
+        epcm, _ = read_wav(data_path(r["enrollment"]))
         m0 = fbank(epcm).astype(np.float64).mean(axis=0)
         emb = embder.embed(epcm)
         emb = emb / np.linalg.norm(emb)
@@ -251,12 +251,12 @@ def eval_script90(sess, embder, cfg, baseline=False):
 
 def eval_short(sess, embder, cfg, max_n, baseline=False):
     """标准短句 e2e（data/mixtures/test 前 100 条，eval_pvad 协议：±20 帧容忍）。"""
-    td = ROOT / "data" / "mixtures" / "test"
+    td = DATA_ROOT / "mixtures" / "test"
     recs = [r for r in load_labels(td / "labels.jsonl") if r.get("overlap_frames")][:max_n]
     ok = miss = false = 0
     for r in recs:
-        pcm, _ = read_wav(ROOT / r["path"])
-        epcm, _ = read_wav(ROOT / r["enrollment"])
+        pcm, _ = read_wav(data_path(r["path"]))
+        epcm, _ = read_wav(data_path(r["enrollment"]))
         m0 = fbank(epcm).astype(np.float64).mean(axis=0)
         emb = embder.embed(epcm)
         emb = emb / np.linalg.norm(emb)
@@ -299,7 +299,7 @@ def main():
     cfg = DualCfg(args.W, args.warmup, args.rule, args.theta)
 
     if args.grid_val:
-        td = ROOT / "data/mixtures_long/val"
+        td = DATA_ROOT / "mixtures_long/val"
         W_list = args.W_list
         if not W_list:
             print("=== 基线（单实例+会话策略） val ===")
@@ -330,7 +330,7 @@ def main():
 
     if args.grid_mean:
         # 第三轮：mean / wmean 网格（W ∈ {6,8}；mean θ∈{0.4..0.7}；wmean τ∈{10,20} × θ∈{0.4..0.6}）
-        td = ROOT / "data/mixtures_long/val"
+        td = DATA_ROOT / "mixtures_long/val"
         print("=== 第三轮 mean/wmean 网格（val n=60）===")
         rows = []
         for W in (6, 8):
@@ -365,7 +365,7 @@ def main():
         ok, nf, nt = eval_script90(sess, embder, cfg, baseline=args.baseline)
         print(f"=== 90s 剧本（{b}）: 目标 {ok}/4 噪声 {nf} 非目标 {nt} ===")
     if args.test:
-        td = ROOT / "data/mixtures_long/test"
+        td = DATA_ROOT / "mixtures_long/test"
         b = "基线" if args.baseline else f"双窗 {cfg}"
         m = eval_long(td, sess, embder, cfg, args.max_n_test, baseline=args.baseline)
         print(f"=== 长流 test n={m['n']}（{b}）: tgt_rec={m['tgt_rec']:.3f} "

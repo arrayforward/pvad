@@ -6,11 +6,28 @@ fbank 参数对齐 C++ 版: 16kHz, 80 mel, 25ms(400)/10ms(160), fft 512,
 帧数 = 1 + (n-400)//160。embedding 前做 per-bin 均值归一化 (3D-Speaker 做法)。
 """
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
+# 数据根已迁出项目目录 (防误删护栏, 见 AGENTS.md)
+DATA_ROOT = Path(os.environ.get("PVAD_DATA_ROOT", "D:/ai-app/pvad-data"))
+
+
+def data_path(rel):
+    """manifest/labels 里的相对路径 ('data/...') → 数据根下的绝对路径。"""
+    rel = str(rel).replace("\\", "/")
+    if rel.startswith("data/"):
+        return DATA_ROOT / rel[5:]
+    return DATA_ROOT / rel
+
+
+def manifest_rel(p: Path) -> str:
+    """数据根下的绝对路径 → manifest 相对路径 ('data/...')。"""
+    return "data/" + str(Path(p).relative_to(DATA_ROOT)).replace("\\", "/")
+
 SR = 16000
 FRAME_LEN = 400
 FRAME_SHIFT = 160

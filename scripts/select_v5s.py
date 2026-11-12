@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, load_labels  # noqa: E402
+from pvad_common import ROOT, load_labels, DATA_ROOT  # noqa: E402
 from train_pvad import MODELS  # noqa: E402
 from eval_stream import gate_trigger, judge  # noqa: E402
 
@@ -20,7 +20,7 @@ def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("ckpts", nargs="+")
-    ap.add_argument("--val-dir", default=str(ROOT / "data" / "mixtures_v4" / "val"))
+    ap.add_argument("--val-dir", default=str(DATA_ROOT / "mixtures_v4" / "val"))
     ap.add_argument("--max-n", type=int, default=500)
     ap.add_argument("--feats-subdir", default="feats_ema")
     args = ap.parse_args()

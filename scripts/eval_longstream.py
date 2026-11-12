@@ -26,7 +26,7 @@ import numpy as np
 import onnxruntime as ort
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, fbank, read_wav, load_labels, CampplusEmbedder  # noqa: E402
+from pvad_common import ROOT, fbank, read_wav, load_labels, CampplusEmbedder, DATA_ROOT  # noqa: E402
 
 CHUNK = 5
 CONFIRM = 2
@@ -194,14 +194,14 @@ def main():
     embder = CampplusEmbedder(intra_threads=4)
 
     if args.split:
-        td = ROOT / "data" / "mixtures_long" / args.split
+        td = DATA_ROOT / "mixtures_long" / args.split
         print(f"=== 长流 {args.split} (n≤{args.max_n}) {Path(args.stream_onnx).name} ===")
         eval_split(sess, td, embder, args.max_n)
     if args.script90:
         print(f"=== 90s 剧本 ({Path(args.stream_onnx).name}) ===")
         eval_script90(sess, embder)
     if args.cold_start:
-        td = ROOT / "data" / "mixtures_long" / (args.split or "test")
+        td = DATA_ROOT / "mixtures_long" / (args.split or "test")
         print(f"=== 冷启动 P 曲线 (负样本流, {td.name}) ===")
         cold_start(sess, ref, td, embder)
     return 0

@@ -19,7 +19,7 @@ import numpy as np
 import onnxruntime as ort
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, fbank, read_wav, load_labels  # noqa: E402
+from pvad_common import ROOT, fbank, read_wav, load_labels, DATA_ROOT, data_path  # noqa: E402
 
 FULL_ONNX = ROOT / "models" / "pvad" / "pvad_v4.onnx"
 STREAM_ONNX = ROOT / "models" / "pvad" / "pvad_v4_stream.onnx"
@@ -163,8 +163,8 @@ def main():
     # v5/v6 模型的流式输入含 enroll_tokens
     use_tokens = "enroll_tokens" in [i.name for i in sess_stream.get_inputs()]
 
-    for tag, td in (("干净", ROOT / "data" / "mixtures" / "test"),
-                    ("增广", ROOT / "data" / "mixtures_v2" / "test")):
+    for tag, td in (("干净", DATA_ROOT / "mixtures" / "test"),
+                    ("增广", DATA_ROOT / "mixtures_v2" / "test")):
         recs = [r for r in load_labels(td / "labels.jsonl")
                 if r.get("overlap_frames")][: args.max_n]
         base_stats, var_stats = {}, {}
@@ -174,7 +174,7 @@ def main():
                                  "running_prior", "ema_prior", "perframe"]}
         base_gate = {"ok": 0, "miss": 0, "false": 0}
         for r in recs:
-            pcm, _ = read_wav(ROOT / r["path"])
+            pcm, _ = read_wav(data_path(r["path"]))
             raw = fbank(pcm).astype(np.float64)
             if use_tokens:
                 emb = None
@@ -186,7 +186,7 @@ def main():
             T = min(len(raw), len(labels))
             raw, labels = raw[:T], labels[:T]
             # enrollment fbank 均值先验 (同说话人同信道)
-            epcm, _ = read_wav(ROOT / r["enrollment"])
+            epcm, _ = read_wav(data_path(r["enrollment"]))
             m0 = fbank(epcm).astype(np.float64).mean(axis=0)
             # v6 (perframe): 基线用同一逐帧归一化 (离线=流式同分布)
             base_fx = (cmvn_perframe(raw) if args.cmvn == "perframe"

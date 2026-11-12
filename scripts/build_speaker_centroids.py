@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, read_wav  # noqa: E402
+from pvad_common import ROOT, read_wav, DATA_ROOT, data_path  # noqa: E402
 
 _BY_SPK = None
 _EMB = None
@@ -22,11 +22,11 @@ _EMB = None
 def _init_worker():
     global _BY_SPK
     if _BY_SPK is None:
-        split = json.load(open(ROOT / "data" / "split.json", encoding="utf-8"))
+        split = json.load(open(DATA_ROOT / "split.json", encoding="utf-8"))
         # 全部池 (train/val/test), 供各 split 的易混淆负样本查近邻
         all_spk = set(split["train"]) | set(split["val"]) | set(split["test"])
         _BY_SPK = {}
-        with open(ROOT / "data" / "manifest.jsonl", encoding="utf-8") as f:
+        with open(DATA_ROOT / "manifest.jsonl", encoding="utf-8") as f:
             for line in f:
                 r = json.loads(line)
                 if r["speaker"] in all_spk and r["duration_s"] >= 3.0:
@@ -42,7 +42,7 @@ def work(spk):
     embs = []
     for p in _BY_SPK[spk][:3]:
         try:
-            pcm, _ = read_wav(ROOT / p)
+            pcm, _ = read_wav(data_path(p))
             embs.append(_EMB.embed(pcm))
         except Exception:
             pass
@@ -68,7 +68,7 @@ def main():
         for spk, c in ex.map(work, spk_list, chunksize=8):
             if c is not None:
                 centroids[spk] = c
-    np.savez(ROOT / "data" / "speaker_centroids.npz", **centroids)
+    np.savez(DATA_ROOT / "speaker_centroids.npz", **centroids)
     print(f"质心 {len(centroids)} 个, 耗时 {time.time()-t0:.0f}s")
 
     spks = sorted(centroids)
@@ -77,7 +77,7 @@ def main():
     np.fill_diagonal(sims, -2)
     top5 = np.argsort(-sims, axis=1)[:, :5]
     nn = {spks[i]: [spks[j] for j in top5[i]] for i in range(len(spks))}
-    with open(ROOT / "data" / "speaker_top5.json", "w", encoding="utf-8") as f:
+    with open(DATA_ROOT / "speaker_top5.json", "w", encoding="utf-8") as f:
         json.dump(nn, f, ensure_ascii=False)
     s0 = spks[0]
     idx = {s: i for i, s in enumerate(spks)}

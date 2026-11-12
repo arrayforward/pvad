@@ -24,6 +24,22 @@ import numpy as np
 import soundfile as sf
 
 ROOT = Path(__file__).resolve().parent.parent
+# 数据根已迁出项目目录 (防误删护栏, 见 AGENTS.md)
+import os
+DATA_ROOT = Path(os.environ.get("PVAD_DATA_ROOT", "D:/ai-app/pvad-data"))
+
+
+def data_path(rel):
+    rel = str(rel).replace("\\", "/")
+    if rel.startswith("data/"):
+        return DATA_ROOT / rel[5:]
+    return DATA_ROOT / rel
+
+
+def manifest_rel(p: Path) -> str:
+    return "data/" + str(Path(p).relative_to(DATA_ROOT)).replace("\\", "/")
+
+
 SR = 16000
 FRAME_MS = 10
 FRAME = SR * FRAME_MS // 1000  # 160 samples
@@ -179,13 +195,13 @@ class Augmenter:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--manifest", default=str(ROOT / "data" / "manifest.jsonl"))
-    ap.add_argument("--out", default=str(ROOT / "data" / "mixtures" / "sample"))
+    ap.add_argument("--manifest", default=str(DATA_ROOT / "manifest.jsonl"))
+    ap.add_argument("--out", default=str(DATA_ROOT / "mixtures" / "sample"))
     ap.add_argument("--n", type=int, default=50)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--pool", choices=["train", "val", "test"], default=None,
                     help="只从 data/split.json 对应说话人池抽取")
-    ap.add_argument("--split-file", default=str(ROOT / "data" / "split.json"))
+    ap.add_argument("--split-file", default=str(DATA_ROOT / "split.json"))
     ap.add_argument("--negatives", type=int, default=0,
                     help="追加生成 target-absent 负样本 (只有干扰说话人, "
                          "enrollment 来自不在场的另一说话人, 标签无 2)")
@@ -302,13 +318,13 @@ def main():
                     st = None
             lf.write(json.dumps({
                 "id": uid,
-                "path": str(wav_path.relative_to(ROOT)).replace("\\", "/"),
+                "path": manifest_rel(wav_path),
                 "target_speaker": tgt_spk,
                 "interferer_speaker": itf_spk,
                 "snr_db": round(snr_db, 2),
                 "duration_s": round(len(mix) / SR, 3),
                 "frame_ms": FRAME_MS,
-                "enrollment": str(enroll.relative_to(ROOT)).replace("\\", "/"),
+                "enrollment": manifest_rel(enroll),
                 "overlap_frames": overlap,
                 "labels": labels,
             }, ensure_ascii=False) + "\n")
@@ -367,13 +383,13 @@ def main():
             labels = frame_labels(np.zeros(length, dtype=np.int8), mask_g)
             lf.write(json.dumps({
                 "id": uid,
-                "path": str(wav_path.relative_to(ROOT)).replace("\\", "/"),
+                "path": manifest_rel(wav_path),
                 "target_speaker": enroll_spk,
                 "interferer_speaker": itf_spk,
                 "snr_db": round(rng.uniform(-5.0, 10.0), 2),  # 名义值, 无目标语音
                 "duration_s": round(len(mix) / SR, 3),
                 "frame_ms": FRAME_MS,
-                "enrollment": str(enroll.relative_to(ROOT)).replace("\\", "/"),
+                "enrollment": manifest_rel(enroll),
                 "overlap_frames": [],
                 "negative": True,
                 "double_interferer": bool(itf_spk2),
@@ -386,10 +402,10 @@ def main():
     # 校验: 重读一条, 检查长度与标签帧数一致, enrollment 存在
     with open(labels_path, encoding="utf-8") as f:
         rec = json.loads(f.readline())
-    data, sr = sf.read(str(ROOT / rec["path"]))
+    data, sr = sf.read(str(data_path(rec["path"])))
     exp_frames = (len(data) + FRAME - 1) // FRAME
     ok = (sr == SR and len(rec["labels"]) == exp_frames
-          and (ROOT / rec["enrollment"]).exists()
+          and (data_path(rec["enrollment"])).exists()
           and rec["enrollment"] not in rec["path"])
     print(f"校验 {rec['id']}: sr={sr}, 采样点={len(data)}, "
           f"标签帧数={len(rec['labels'])}, 期望={exp_frames}, "

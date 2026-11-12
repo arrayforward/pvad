@@ -19,7 +19,7 @@ import onnxruntime as ort
 import wave
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, fbank, read_wav, CampplusEmbedder  # noqa: E402
+from pvad_common import ROOT, fbank, read_wav, CampplusEmbedder, DATA_ROOT  # noqa: E402
 
 LS = ROOT / "test_audio" / "longstream"
 
@@ -36,14 +36,14 @@ SCRIPT = [  # (label, dur_s, kind)  kind: n=noise a=target b=other c=echo
 
 
 def build():
-    A = sorted(glob.glob(str(ROOT / "data/speakers/stcmds/P00190/*.wav")))
-    B = sorted(glob.glob(str(ROOT / "data/speakers/stcmds/P00089/*.wav")))
-    C = sorted(glob.glob(str(ROOT / "data/speakers/stcmds/P00351/*.wav")))
+    A = sorted(glob.glob(str(DATA_ROOT / "speakers/stcmds/P00190/*.wav")))
+    B = sorted(glob.glob(str(DATA_ROOT / "speakers/stcmds/P00089/*.wav")))
+    C = sorted(glob.glob(str(DATA_ROOT / "speakers/stcmds/P00351/*.wav")))
     enroll = [read16(A[0]), read16(A[1])]
     a_pool = [read16(f) for f in A[2:40]]
     b_pool = [read16(f) for f in B[2:20]]
     c_pool = [read16(f) for f in C[2:20]]
-    noise = read16(ROOT / "data/raw/aug/musan/noise/free-sound/noise-free-sound-0000.wav") * 0.3
+    noise = read16(DATA_ROOT / "raw/aug/musan/noise/free-sound/noise-free-sound-0000.wav") * 0.3
     sa, sb, sc = [2], [0], [0]
 
     def take(pool, dur, st):

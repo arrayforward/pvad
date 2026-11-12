@@ -68,6 +68,13 @@ pyarrow 25（ST-CMDS parquet 解码）。国内网络建议 `-i https://pypi.tun
 
 ## 2. 数据管线
 
+> **数据位置（2026-11 迁移）**：训练数据已整体迁出本仓库至 `D:/ai-app/pvad-data/`
+> （防误删，见 AGENTS.md）。本文中所有 `data/...` 路径均由脚本经
+> `scripts/pvad_common.py` 的 `data_path()` 解析到数据根目录：默认
+> `D:/ai-app/pvad-data`，可用环境变量 `PVAD_DATA_ROOT` 覆盖。
+> 即文档里的 `data/mixtures/test` 实际指向 `D:/ai-app/pvad-data/mixtures/test`，
+> 命令本身无需改动。
+
 ### 2.1 语料来源
 
 | 语料 | 规模 | 来源（实际使用） | 备注 |
@@ -81,7 +88,7 @@ pyarrow 25（ST-CMDS parquet 解码）。国内网络建议 `-i https://pypi.tun
 
 经验：openslr.org 直连 ~0.8MB/s 且镜像站（trmal/elda/magicdatatech）按 IP 限流到
 ~20KB/s；ModelScope git-LFS 国内 6-17MB/s，是首选渠道。原始压缩包保留在
-`data/raw/`（含 `aug/` 下已解压的 MUSAN/RIR），清理磁盘时优先删别处。
+`data/raw/`（即 `D:/ai-app/pvad-data/raw/`，含 `aug/` 下已解压的 MUSAN/RIR）。
 
 ### 2.2 整理与划分
 
@@ -283,10 +290,11 @@ Split 节点带非法 `num_outputs` 属性，需改用切片（已在代码中�
 | `.venv/` | ~2G | Python 训练环境（可由 requirements.txt 重建） | 可删可重建 |
 | `data/manifest.jsonl` / `split.json` | <100M | 语料清单 / 说话人划分 | 保留 |
 
-D: 盘当前剩余 ~85GB。若需释放空间，优先顺序：`data/raw` 压缩包（可从
-ModelScope 重下，~54G）> `data/mixtures_v2`（可重新合成）> 其余勿动。
-`data/extracted/`（解压中间产物，~25G）已在早前清理，需要时从 `data/raw`
-重新解压即可。
+D: 盘剩余空间有限。若需释放空间，**先 `du -sh` 列出占用并征得用户同意**
+（见 AGENTS.md 护栏，禁止自行删除非 `_tmp*` 内容）；可再生的优先顺序：
+`data/raw` 压缩包（可从 ModelScope 重下，~54G）> `data/mixtures_v2`（可重新合成）
+> 其余勿动。解压中间产物放 `data/_tmp_extract/`（约 25G，`_tmp` 前缀，用完即删），
+需要时从 `data/raw` 重新解压即可。
 
 ## 8. 已知问题与下一步
 

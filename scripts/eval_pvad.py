@@ -16,7 +16,7 @@ import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, load_labels  # noqa: E402
+from pvad_common import ROOT, load_labels, DATA_ROOT, data_path  # noqa: E402
 from train_pvad import MODELS, MixtureDataset, collate, FEAT_DIM, EMB_DIM  # noqa: E402
 
 
@@ -150,10 +150,10 @@ def e2e(args, model=None):
     # 干扰说话人语句索引 (负模板用)
     import collections
     spk_utts = collections.defaultdict(list)
-    with open(ROOT / "data" / "manifest.jsonl", encoding="utf-8") as f:
+    with open(DATA_ROOT / "manifest.jsonl", encoding="utf-8") as f:
         for line in f:
             r = json.loads(line)
-            spk_utts[r["speaker"]].append(ROOT / r["path"])
+            spk_utts[r["speaker"]].append(data_path(r["path"]))
 
     WIN = 50  # 500ms = 50 帧
     stats = {"pvad": {"miss": 0, "false": 0, "ok": 0, "delay": []},
@@ -185,7 +185,7 @@ def e2e(args, model=None):
         judge(stats["pvad"], trig, overlaps, labels)
 
         # ---- CAM++ AS-norm 门控 (500ms 窗, 无重叠) ----
-        pcm, _ = read_wav(ROOT / r["path"])
+        pcm, _ = read_wav(data_path(r["path"]))
         enroll_emb = emb
         # 负模板: 干扰说话人的一条语句 embedding
         itf_utts = spk_utts[r["interferer_speaker"]]
@@ -246,7 +246,7 @@ def main():
     ap.add_argument("--frames", action="store_true")
     ap.add_argument("--e2e", action="store_true")
     ap.add_argument("--all", action="store_true")
-    ap.add_argument("--test-dir", default=str(ROOT / "data" / "mixtures" / "test"))
+    ap.add_argument("--test-dir", default=str(DATA_ROOT / "mixtures" / "test"))
     ap.add_argument("--max-n", type=int, default=500)
     ap.add_argument("--ckpt", default=None,
                     help="checkpoint 路径, 默认 models/pvad/best.pt")

@@ -26,12 +26,12 @@ import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_mixtures import Augmenter, frame_labels, load_manifest, read_wav, rms  # noqa: E402
-from pvad_common import ROOT  # noqa: E402
+from pvad_common import ROOT, DATA_ROOT, manifest_rel  # noqa: E402
 
 SR = 16000
 FRAME = 160
-RIR_DIR = ROOT / "data" / "raw" / "aug" / "RIRS_NOISES" / "simulated_rirs"
-NOISE_DIR = ROOT / "data" / "raw" / "aug" / "musan"
+RIR_DIR = DATA_ROOT / "raw" / "aug" / "RIRS_NOISES" / "simulated_rirs"
+NOISE_DIR = DATA_ROOT / "raw" / "aug" / "musan"
 
 
 def speech_track(rng, utts, dur_s):
@@ -73,16 +73,16 @@ def main():
 
     rng = random.Random(args.seed)
     out_dir = Path(args.out).resolve() if args.out else (
-        ROOT / "data" / "mixtures_long" / args.split)
+        DATA_ROOT / "mixtures_long" / args.split)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "enrollments").mkdir(exist_ok=True)
     aug = Augmenter(str(RIR_DIR), str(NOISE_DIR))
 
-    with open(ROOT / "data" / "split.json", encoding="utf-8") as f:
+    with open(DATA_ROOT / "split.json", encoding="utf-8") as f:
         pools = json.load(f)
-    with open(ROOT / "data" / "speaker_top5.json", encoding="utf-8") as f:
+    with open(DATA_ROOT / "speaker_top5.json", encoding="utf-8") as f:
         top5 = json.load(f)
-    by_spk = load_manifest(ROOT / "data" / "manifest.jsonl")
+    by_spk = load_manifest(DATA_ROOT / "manifest.jsonl")
     speakers = [s for s in pools[args.split] if s in by_spk and len(by_spk[s]) >= 3]
     print(f"[{args.split}] 说话人池 {len(speakers)}, 输出 {out_dir}")
 
@@ -110,8 +110,8 @@ def main():
             wet = aug.apply_rir(pcm, rng)
             ep = out_dir / "enrollments" / f"{uid}.wav"
             sf.write(str(ep), wet, SR, subtype="PCM_16")
-            return ep.relative_to(ROOT).as_posix()
-        return str(src.relative_to(ROOT)).replace("\\", "/")
+            return manifest_rel(ep)
+        return manifest_rel(src)
 
     kinds = (["short"] * 20 + ["pure_neg"] * 20 + ["absorb"] * 30 + ["normal"] * 30)
     cycle = kinds[:]
@@ -234,7 +234,7 @@ def main():
             enroll = make_enrollment(tgt_spk, used_src, uid)
             lf.write(json.dumps({
                 "id": uid,
-                "path": wav_path.relative_to(ROOT).as_posix(),
+                "path": manifest_rel(wav_path),
                 "target_speaker": tgt_spk,
                 "interferer_speaker": itf_spk,
                 "snr_db": round(rng.uniform(-5, 10), 2),
