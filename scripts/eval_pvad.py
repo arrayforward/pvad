@@ -47,7 +47,7 @@ def frame_metrics(model, test_dir, feats_subdir="feats"):
     # 按 SNR 分档统计: bucket -> [tp, fp, fn, far_n, far_d, correct, total]
     buckets = {}
     i = 0
-    for x, e, kv_mask, y in ld:
+    for x, e, kv_mask, y, _w in ld:
         logits = model(x, e, kv_mask) if use_tokens else model(x, e)
         pred = logits.argmax(-1)
         B = x.shape[0]

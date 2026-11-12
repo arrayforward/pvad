@@ -46,11 +46,14 @@ def main():
     ap.add_argument("--pvad-model", default="models/pvad/pvad_v3.onnx")
     ap.add_argument("--denoise", default="rnnoise")
     ap.add_argument("--max-n", type=int, default=200)
+    ap.add_argument("--tag", default=None,
+                    help="模板/列表缓存目录名 (默认按 test-dir 推导); "
+                         "换数据后须换新 tag, 否则会复用旧数据注册的模板")
     args = ap.parse_args()
 
     td = Path(args.test_dir)
-    tag = td.name  # test / test (mixtures_v2 下也叫 test，用父目录区分)
-    if td.parent.name != "data":
+    tag = args.tag or td.name  # test / test (mixtures_v2 下也叫 test，用父目录区分)
+    if not args.tag and td.parent.name != "data":
         tag = f"{td.parent.name}_{td.name}"
     tpl_dir = ROOT / "build" / "grid_tpl" / tag
     list_path = ROOT / "build" / f"grid_list_{tag}.tsv"
