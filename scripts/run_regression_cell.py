@@ -15,6 +15,17 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# 数据根已迁出项目目录 (防误删护栏, 见 AGENTS.md)
+import os
+DATA_ROOT = Path(os.environ.get("PVAD_DATA_ROOT", "D:/ai-app/pvad-data"))
+
+
+def data_path(rel):
+    rel = str(rel).replace("\\", "/")
+    if rel.startswith("data/"):
+        return DATA_ROOT / rel[5:]
+    return DATA_ROOT / rel
+
 TOL = 20
 
 
@@ -54,10 +65,18 @@ def main():
                 recs.append(r)
     recs = recs[: args.max_n]
     if not tpl_dir.exists() or len(list(tpl_dir.glob("*.bin"))) < len(recs):
+        # enroll.exe 批量模式按 root + "/" + path 取 wav；labels 里是
+        # "data/..." 相对路径，数据根迁出后先改写成绝对路径的临时 jsonl
+        res_jsonl = ROOT / "build" / f"grid_labels_{tag}.jsonl"
+        with open(res_jsonl, "w", encoding="utf-8") as f:
+            for r in recs:
+                r2 = dict(r)
+                r2["enrollment"] = str(data_path(r["enrollment"])).replace("\\", "/")
+                f.write(json.dumps(r2, ensure_ascii=False) + "\n")
         print(f"[1/3] enroll batch -> {tpl_dir}")
         p = subprocess.run(
             [str(ROOT / "build" / "enroll.exe"), "--batch-jsonl",
-             str(td / "labels.jsonl"), "--out-dir", str(tpl_dir),
+             str(res_jsonl), "--out-dir", str(tpl_dir),
              "--max-n", str(args.max_n), "--root", "."],
             cwd=ROOT, capture_output=True, text=True)
         if p.returncode != 0:
@@ -66,10 +85,12 @@ def main():
     else:
         print(f"[1/3] enroll batch cached ({len(list(tpl_dir.glob('*.bin')))} tpls)")
 
-    # 2) 生成列表并跑批量管线
+    # 2) 生成列表并跑批量管线（wav 用绝对路径，数据根已迁出）
     with open(list_path, "w", encoding="utf-8") as f:
         for r in recs:
-            f.write(f"{r['path']}\tbuild/grid_tpl/{tag}/{r['id']}.bin\n")
+            wav_abs = str(data_path(r["path"])).replace("\\", "/")
+            tpl_abs = str(tpl_dir / f"{r['id']}.bin").replace("\\", "/")
+            f.write(f"{wav_abs}\t{tpl_abs}\n")
     print(f"[2/3] double_voice batch ({len(recs)} files, model={args.pvad_model}, denoise={args.denoise})")
     p = subprocess.run(
         [str(ROOT / "build" / "double_voice.exe"), "--batch-list", str(list_path),
@@ -90,7 +111,7 @@ def main():
     delays = []
     missing = 0
     for r in recs:
-        key = r["path"]
+        key = str(data_path(r["path"])).replace("\\", "/")  # 与 TSV 写入一致
         if key not in results:
             missing += 1
             stats["miss"] += 1

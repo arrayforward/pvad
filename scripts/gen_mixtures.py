@@ -53,7 +53,7 @@ def load_manifest(path: Path):
             if not line:
                 continue
             r = json.loads(line)
-            by_spk[r["speaker"]].append((ROOT / r["path"], r["duration_s"]))
+            by_spk[r["speaker"]].append((data_path(r["path"]), r["duration_s"]))
     # 过滤文件不存在的
     return {s: [pd for pd in ps if pd[0].exists()] for s, ps in by_spk.items()}
 

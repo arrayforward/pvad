@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, load_labels, DATA_ROOT  # noqa: E402
+from pvad_common import ROOT, load_labels, DATA_ROOT, data_path  # noqa: E402
 
 # split -> (从 v3 取的条数, 预留易混淆负样本数)
 PLAN = {"train": (19000, 2000), "val": (2350, 150)}
@@ -41,7 +41,7 @@ def main():
         rng.shuffle(recs)
         recs = recs[:n_base]
         for r in recs:
-            link(ROOT / r["path"], out_dir / f"{r['id']}.wav")
+            link(data_path(r["path"]), out_dir / f"{r['id']}.wav")
             link(src_dir / "feats" / f"{r['id']}.npy",
                  out_dir / "feats" / f"{r['id']}.npy")
             link(src_dir / "emb" / f"{r['id']}.npy",

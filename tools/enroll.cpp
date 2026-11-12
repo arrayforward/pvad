@@ -55,7 +55,10 @@ static int run_batch(const std::string& jsonl, const std::string& out_dir, int m
         std::string enroll_wav = json_str(s, "enrollment");
         if (id.empty() || enroll_wav.empty()) continue;
         try {
-            WavData wd = read_wav(root + "/" + enroll_wav);
+            // 数据根迁出后 jsonl 可能含绝对路径（盘符:/ 或 / 开头），此时不拼 root
+            bool abs_path = enroll_wav.find(':') != std::string::npos ||
+                            (!enroll_wav.empty() && enroll_wav[0] == '/');
+            WavData wd = read_wav(abs_path ? enroll_wav : root + "/" + enroll_wav);
             auto emb = spk.embed(wd.samples.data(), (int)wd.samples.size());
             Template tpl;
             tpl.pos = std::move(emb);

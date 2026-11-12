@@ -21,6 +21,14 @@ ROOT = Path(__file__).resolve().parent.parent
 # 数据根已迁出项目目录 (防误删护栏, 见 AGENTS.md)
 import os
 DATA_ROOT = Path(os.environ.get("PVAD_DATA_ROOT", "D:/ai-app/pvad-data"))
+
+
+def data_path(rel):
+    rel = str(rel).replace("\\", "/")
+    if rel.startswith("data/"):
+        return DATA_ROOT / rel[5:]
+    return DATA_ROOT / rel
+
 TOL = 20
 
 
@@ -63,8 +71,8 @@ def main():
     with tempfile.TemporaryDirectory() as td:
         tpl = Path(td) / "tpl.bin"
         for i, r in enumerate(recs):
-            mix = ROOT / r["path"]
-            enroll_wav = ROOT / r["enrollment"]
+            mix = data_path(r["path"])
+            enroll_wav = data_path(r["enrollment"])
             p = subprocess.run(
                 [str(ROOT / "build" / "enroll.exe"), "--out", str(tpl),
                  "--pos", str(enroll_wav)],

@@ -81,7 +81,7 @@ def main():
             rng.shuffle(recs)
             for r in recs[:per_src]:
                 nid = f"{src_name}_{r['id']}"
-                link(ROOT / r["path"], out_dir / f"{nid}.wav")
+                link(data_path(r["path"]), out_dir / f"{nid}.wav")
                 link(src_dir / "feats" / f"{r['id']}.npy",
                      out_dir / "feats" / f"{nid}.npy")
                 emb_out = out_dir / "emb" / f"{nid}.npy"

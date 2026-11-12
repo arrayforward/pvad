@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pvad_common import ROOT, fbank, mean_normalize, load_labels  # noqa: E402
+from pvad_common import ROOT, data_path, fbank, mean_normalize, load_labels  # noqa: E402
 
 _EMBEDDER = None
 
@@ -54,7 +54,7 @@ def process_one(args):
     try:
         if not Path(feat_out).exists():
             from pvad_common import read_wav
-            pcm, sr = read_wav(ROOT / mix_path)
+            pcm, sr = read_wav(data_path(mix_path))
             feats = fbank(pcm)
             if cmvn_mode == "ema":
                 feats = cmvn_ema_np(feats.astype(np.float64)).astype(np.float32)
@@ -68,7 +68,7 @@ def process_one(args):
             np.save(feat_out, feats.astype(np.float32))
         if not Path(emb_out).exists():
             from pvad_common import read_wav
-            pcm, sr = read_wav(ROOT / enroll_path)
+            pcm, sr = read_wav(data_path(enroll_path))
             emb = _get_embedder().embed(pcm)
             np.save(emb_out, emb.astype(np.float32))
         return uid, None
@@ -84,7 +84,7 @@ def process_tokens(args):
         if Path(out_path).exists():
             return uid, None
         from pvad_common import read_wav
-        pcm, sr = read_wav(ROOT / enroll_path)
+        pcm, sr = read_wav(data_path(enroll_path))
         emb = _get_embedder()
         n = len(pcm) // 16000
         toks = [emb.embed(pcm[i * 16000:(i + 1) * 16000]) for i in range(n)]
