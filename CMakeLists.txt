@@ -43,6 +43,7 @@ target_compile_definitions(rnnoise PRIVATE _USE_MATH_DEFINES)  # MSVC 的 math.h
 # --- core library: AEC + VAD + fbank + speaker embedding ---
 add_library(core STATIC
     src/aec.cpp
+    src/agc.cpp
     src/vad.cpp
     src/fbank.cpp
     src/speaker.cpp

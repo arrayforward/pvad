@@ -103,6 +103,14 @@ void Engine::init() {
         tse_enc_.reset();
         emit logLine("TSE 声纹编码器加载失败（打断转写不可用）: " + QString::fromStdString(e.what()));
     }
+    try {
+        direct_gate_ = std::make_unique<DirectGate>(
+            (root + "/models/tse_e16/direct_v3.onnx").toStdString(), 0.0f, 0.3f);
+        emit logLine("句级二级复核已加载（direct_v3 TH=0.0，不确定区放行）");
+    } catch (const std::exception& e) {
+        direct_gate_.reset();
+        emit logLine("二级复核加载失败（仅跳过复核，不影响打断转写）: " + QString::fromStdString(e.what()));
+    }
     {
         asr_ = std::make_unique<Asr>();
         QString asr_dir = qEnvironmentVariable("ASR_MODEL_DIR",
@@ -143,6 +151,7 @@ QString Engine::enrollmentDir() const {
 }
 
 void Engine::persistEnrollment() {
+    direct_ref_.clear();  // 注册集合变化后，二级复核引用下次懒重算
     if (tse_enc_ && core_.enrolled()) ensureTseEmb();  // 新段顺带补算 TSE 声纹
     std::string e;
     if (EnrollStore::save(enrollmentDir().toStdString(), core_.segments(), core_.centroid(),
@@ -173,7 +182,7 @@ bool Engine::ensureTseEmb() {
     bool changed = false;
     int failed = 0;
     for (auto& s : segs) {
-        if (!s.tse_emb.empty()) continue;
+        if (!s.tse_emb.empty() && s.tse_emb_agc) continue;
         if (s.wav.empty() || s.wav == "(imported tpl.bin)") continue;
         std::string path = s.wav;
         FILE* probe = fopen(path.c_str(), "rb");
@@ -187,6 +196,7 @@ bool Engine::ensureTseEmb() {
         try {
             WavData wd = read_wav(path);
             s.tse_emb = tse_enc_->encode({wd.samples});
+            s.tse_emb_agc = true;
             changed = true;
         } catch (...) {
             failed++;
@@ -208,6 +218,45 @@ bool Engine::ensureTseEmb() {
         tse_emb_.clear();
     }
     return changed;
+}
+
+bool Engine::ensureDirectRef() {
+    if (direct_ref_.size() == 192) return true;
+    if (!tse_enc_) return false;
+    std::string qtd = (qEnvironmentVariable("DEMO_ROOT", DEMO_ROOT) + "/qt_demo").toStdString();
+    direct_ref_.assign(192, 0.f);
+    int count = 0;
+    for (const auto& s : core_.segments()) {
+        if (s.wav.empty() || s.wav == "(imported tpl.bin)") continue;
+        std::string path = s.wav;
+        FILE* probe = fopen(path.c_str(), "rb");
+        if (!probe) {
+            std::string alt = qtd + "/" + s.wav;
+            probe = fopen(alt.c_str(), "rb");
+            if (probe) path = alt;
+        }
+        if (!probe) continue;
+        fclose(probe);
+        try {
+            WavData wd = read_wav(path);
+            auto e = tse_enc_->encode({wd.samples}, false);  // direct_v3 对照：原始电平
+            for (int i = 0; i < 192; i++) direct_ref_[i] += e[i];
+            count++;
+        } catch (...) {
+        }
+    }
+    if (count > 0) {
+        for (float& v : direct_ref_) v /= (float)count;
+        return true;
+    }
+    // 录音源缺失时退回复用 TSE 注册前 192 维，功能可用但域一致性稍弱。
+    if (tse_emb_.size() == TseSpeakerEncoder::EMB_DIM) {
+        direct_ref_.assign(tse_emb_.begin(), tse_emb_.begin() + 192);
+        emit logLine("二级复核：原注册 wav 不可用，复用持久化 deep-192");
+        return true;
+    }
+    direct_ref_.clear();
+    return false;
 }
 
 void Engine::setAsrEnabled(bool on) {
@@ -235,12 +284,36 @@ void Engine::finalizeCollect() {
         emit logLine(QString("打断语音太短（%1s），跳过转写").arg(sec, 0, 'f', 2));
         return;
     }
+    // v7b 已负责快速打断；direct_v3 只复核是否把本段送入 TSE/ASR，绝不撤销用户打断。
+    // TH=0.0 是高召回工作点，置信度不足时默认放行，优先避免误杀用户。
+    if (direct_gate_ && ensureDirectRef()) {
+        try {
+            auto windows = tse_enc_->encode_windows(seg.data(), (int)seg.size());
+            auto review = direct_gate_->decide(windows, direct_ref_);
+            emit logLine(QString("二级复核：identity=%1 confidence=%2，%3")
+                         .arg(review.identity, 0, 'f', 3).arg(review.confidence, 0, 'f', 3)
+                         .arg(review.closed ? "关闭本段转写" : "放行"));
+            if (review.closed) {
+                emit keepRatio(0.0);
+                emit asrText("");
+                emit logLine("二级复核关闭：本段不进入 TSE/ASR（已发生的用户打断不撤销）");
+                return;
+            }
+        } catch (const std::exception& e) {
+            emit logLine("二级复核异常，按放行降级: " + QString::fromStdString(e.what()));
+        }
+    }
     emit logLine(QString("打断转写：截取 %1s，TSE 提取中（单麦模拟 4ch）...").arg(sec, 0, 'f', 2));
     QString root = qEnvironmentVariable("DEMO_ROOT", DEMO_ROOT);
     std::vector<float> ext;
     try {
         TseEngine eng((root + "/models/tse_e16/erb_df_step.onnx").toStdString(), tse_emb_);
-        ext = tse_extract(eng, seg.data(), (int)seg.size());
+        AgcReport agc;
+        ext = tse_extract(eng, seg.data(), (int)seg.size(), &agc);
+        emit logLine(QString("TSE AGC：RMS %1→%2（%3→%4 dBFS），增益 ×%5，峰值 %6")
+                     .arg(agc.before.rms, 0, 'f', 5).arg(agc.after.rms, 0, 'f', 5)
+                     .arg(agc.before.rms_dbfs(), 0, 'f', 1).arg(agc.after.rms_dbfs(), 0, 'f', 1)
+                     .arg(agc.gain, 0, 'f', 2).arg(agc.after.peak, 0, 'f', 3));
     } catch (const std::exception& e) {
         emit logLine("TSE 提取失败: " + QString::fromStdString(e.what()));
         return;
@@ -365,6 +438,8 @@ void Engine::startListenMic() {
     mic_frame_ = 0;
     collecting_ = false;
     silence_run_ = 0;
+    level_meter_.reset();
+    last_level_log_ms_ = 0;
     if (ma_device_start(&cap_) != MA_SUCCESS) { emit logLine("采集启动失败"); return; }
     listening_ = true;
     emit listenChanged(true);
@@ -491,6 +566,7 @@ void Engine::finishRecord() {
 void Engine::clearEnroll() {
     core_.clear_enroll();
     tse_emb_.clear();
+    direct_ref_.clear();
     collecting_ = false;
     // 删除持久化文件（recordings/ 的 wav 保留）
     QString dir = enrollmentDir();
@@ -607,6 +683,17 @@ void Engine::tick() {
         const float* src = frame;
         float dn[160];
         if (denoise_) { denoise_->process(frame, dn); src = dn; }
+        // 电平量化只观测，不改变 PVAD 输入；TSE 在缓冲切片上另做恒定增益 AGC。
+        level_meter_.add(src, 160);
+        qint64 level_now = QDateTime::currentMSecsSinceEpoch();
+        if (listening_ && level_now - last_level_log_ms_ >= 1000) {
+            AudioLevel level = level_meter_.measure();
+            emit logLine(QString("电平（1s）：RMS %1（%2 dBFS），有效语音 %3，峰值 %4；TSE AGC 目标 0.045")
+                         .arg(level.rms, 0, 'f', 5).arg(level.rms_dbfs(), 0, 'f', 1)
+                         .arg(level.active_rms, 0, 'f', 5).arg(level.peak, 0, 'f', 3));
+            level_meter_.reset();
+            last_level_log_ms_ = level_now;
+        }
         // 打断转写用回放缓冲：post-denoise 采样入 hist_（封顶 8s，8s=800 帧）
         if (asr_enabled_) {
             for (int i = 0; i < 160; i++) hist_.push_back(src[i]);

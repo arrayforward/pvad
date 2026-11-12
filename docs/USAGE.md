@@ -243,13 +243,19 @@ windeployqt 自动拷贝；sherpa/onnxruntime DLL 一并拷贝（onnxruntime.dll
 - `--ui-state-test`：按钮使能状态机与背压决策无头验证（监听中点停止→回 idle→朗读可用、
   向导中朗读禁用、录音互斥、背压丢帧语义，ALL PASS）
 - `--tse-smoke`：TSE 链路冒烟（多尺度声纹注册 → e16 step 提取 → ASR 对照，无断言）
+- `--agc-test`：电平计与 TSE 恒定增益校准验证（有效 RMS=0.045、静音、低电平门限、
+  峰值保护、任意分块一致性，ALL PASS）
 - `--story-test`：听故事打断全链无头验证（见 4.5）
 
 ### 4.5 听故事打断演示（PVAD 守门 → TSE 提取 → ASR 出字）
 
-GUI 完整链路：**麦克风 → RNNoise → PVAD v7b_stream 守门 → 打断后 0.5s 回放缓冲切片 →
-TSE 提取注册用户声音 → sherpa-onnx Paraformer-zh ASR → 文本上屏**。
+GUI 完整链路：**麦克风 → RNNoise → PVAD v7b_stream 快速守门 → 打断后 0.5s 回放缓冲切片 →
+direct_v3 高召回复核 → 电平校准 → TSE 提取注册用户声音 → sherpa-onnx Paraformer-zh ASR →
+文本上屏**。
 
+- **电平计量与校准**：监听日志每 1s 显示 RMS/有效语音 RMS/峰值；PVAD 输入保持原样。
+  TSE 注册和提取切片统一以恒定增益校准到有效语音 RMS=0.045，增益 0.1~12、峰值 0.95，
+  提取日志打印校准前后 dBFS 与实际增益。不要改为逐帧动态 AGC（会损伤 TSE 长时状态）
 - **TTS 区故事下拉**：内置 4 个中文民间故事（龟兔赛跑/愚公移山/孔融让梨/狼来了），
   选中即填入朗读文本框，点 `朗读` 播放
 - **打断转写区**：勾选 `仅保留注册用户声音` 后，监听中一旦 PVAD 触发打断，从触发帧
@@ -270,10 +276,15 @@ TSE 提取注册用户声音 → sherpa-onnx Paraformer-zh ASR → 文本上屏*
   mv third_party/models/sherpa-onnx-paraformer-zh-int8-2025-10-07 third_party/models/paraformer-zh-int8
   ```
   可用 `ASR_MODEL_DIR` 环境变量覆盖路径。TSE 两个模型
-  （`models/tse_e16/erb_df_step.onnx` 40.9MB + `speaker_encoder.onnx` 5.2MB）随仓库提交。
+  （`models/tse_e16/erb_df_step.onnx` 40.9MB + `speaker_encoder.onnx` 5.2MB）及二级复核
+  `direct_v3.onnx`（FP32，含同名 `.data` 外部权重）随仓库提交。
+- **direct_v3 二级复核**：v7b 触发后按 3s 窗/1s hop 计算原始电平 deep-192，使用
+  `TH=0.0/UNC=0.3` 高召回工作点；关闭只丢弃本段 TSE/ASR，**不撤销已发生的用户打断**，
+  不确定、模型加载失败或推理异常都放行。日志显示 identity/confidence 与放行结果。
 - **注册联动**：每段注册除 CAM++ 192 维 embedding 外，顺带算 TSE 4288 维多尺度声纹
-  存入 `segments.json` 的 `tse_emb` 字段（可选字段，旧格式文件加载时从来源 wav 补算，
-  wav 已删则降级警告）
+  存入 `segments.json` 的 `tse_emb` 字段，新校准版本带 `tse_emb_agc:true`。旧格式或缺少
+  该标记的段加载时从来源 wav 重算；wav 已删则保留旧嵌入并降级警告。4288 维向量不做
+  二次 L2 归一化
 - **会话冷启动保护**：会话起始 0.5s 内 PvadStream 的分数不入门控（`o.gated`），
   压掉 EMA/GRU 暂态造成的冷启动 blip（story-test 复现：故事开播 0.40s 处
   P 短暂冲到 0.59 的假触发）
@@ -289,17 +300,19 @@ TSE 提取注册用户声音 → sherpa-onnx Paraformer-zh ASR → 文本上屏*
 3. 对照组（同一切片直接 ASR 混合音）泄漏率明显高于提取组（差值 >0.1）
 4. ASR 输出含注册用户内容（voice1b 文本 LCS 召回 ≥0.2）
 
-**如实记录（2026-11-12 实测，huayan 故事 + SAPI voice1b）**：单麦模拟下 TSE 压制有限，
-指标对回声增益敏感；断言 2/3/4 的通过线按默认配置（gain 0.45, mask 0.5）标定——
-SAPI 注册人是已知弱目标（USAGE 5.3），真实人声的余量更大：
+**如实记录（2026-11-12 实测，huayan 故事 + SAPI voice1b）**：默认配置已加入 TSE
+输入电平校准（整段恒定增益，有效 RMS=0.045）。本例切片 RMS 0.08128→0.04363、有效
+RMS 0.08384→0.04528、增益 ×0.537；故事泄漏由校准前 0.125 降至 0.016，目标召回由
+0.250 升至 0.429，四项断言 ALL PASS。SAPI 注册人仍是已知弱目标（USAGE 5.3），该固定
+剧本结果不代表单麦同电强硬双讲已解决：
 
-| story 增益 | 掩码阈值 | 触发时刻 | leak(ext) | leak(mix) | 目标召回 |
-|---|---|---|---|---|---|
-| 0.45 | 0.50（默认） | 2.45s ✓ | 0.125 | 0.359 | 0.250 |
-| 0.45 | 0.45 | 2.45s ✓ | 0.219 | 0.359 | 0.321 |
-| 0.60 | 0.50 | 2.54s ✓ | 0.172 | 0.359 | 0.179 |
-| 0.60 | 0.35 | 2.54s ✓ | 0.328 | 0.328 | 0.143（掩码阈值过低等同不掩） |
-| 0.30 | 0.35 | 0.77s ✗（冷启动 blip） | 0.172 | 0.281 | 0.500 |
+| 配置 | story 增益 | 掩码阈值 | 触发时刻 | leak(ext) | leak(mix) | 目标召回 |
+|---|---|---|---|---|---|---|
+| **AGC=0.045（当前）** | 0.45 | 0.50（默认） | 2.45s ✓ | **0.016** | 0.359 | **0.429** |
+| 校准前历史值 | 0.45 | 0.50 | 2.45s ✓ | 0.125 | 0.359 | 0.250 |
+| 校准前历史值 | 0.45 | 0.45 | 2.45s ✓ | 0.219 | 0.359 | 0.321 |
+| 校准前历史值 | 0.60 | 0.50 | 2.54s ✓ | 0.172 | 0.359 | 0.179 |
+| 校准前历史值 | 0.60 | 0.35 | 2.54s ✓ | 0.328 | 0.328 | 0.143 |
 
 中间产物写到 `qt_demo/recordings/_tmp_story_{mix,seg,ext,ext_masked}.wav` 便于人工试听核对。
 

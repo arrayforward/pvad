@@ -51,6 +51,7 @@ python 口径仅 −0.5pp）。
 | `pvad_stream.h/.cpp` | 流式 PVAD：GRU state 复用 + EMA CMVN + 先验 | `set_emb/set_cmvn_prior/set_warmup`；`push_frame(fbank80) -> Out{p,valid,gated,frame}`；`reset()` |
 | `gate.h` | 门控状态机 | `PvadGate::update(p) -> bool fire`（confirm/hyst）；`Gate`（AS-norm z+margin，对照路径） |
 | `denoise.h/.cpp` | RNNoise 实时降噪（speex_resampler 16k↔48k，帧界对齐队列） | `Denoise::process(in160, out160)`；0.061 ms/帧，+11.4ms 延迟 |
+| `agc.h/.cpp` | 电平计量与 TSE 切片恒定增益校准（不进 PVAD 门控支路） | `LevelMeter::add/measure`；`agc_normalize(pcm,n,0.045,&report)` |
 | `aec.h/.cpp` | SpeexDSP MDF 回声消除（**可选 `--aec`，默认关**） | `Aec::process(near, far, out)` |
 | `wav_io.h` | 极简 WAV 读写（16k 16bit PCM / 32bit float 单声道） | `read_wav(path) -> WavData`；`write_wav16` |
 
@@ -184,3 +185,30 @@ qt_demo 的 `enrollment/tpl.bin` 与 CLI `enroll` 产物完全同格式，双向
 | speexdsp 1.2.1 | 源码编入（mdf/resample 等） | 可选 AEC + RNNoise 重采样 |
 | rnnoise (xiph master) | 源码编入 | 实时降噪（默认开） |
 | Qt 6.8.3 msvc2022_64 | 官方安装 | qt_demo GUI（windeployqt 部署） |
+
+---
+
+## 7. TSE 支路与电平校准契约
+
+```
+mic ─► RNNoise ─┬► PVAD v7b_stream（原始 post-RNNoise 电平，不做 AGC）─► INTERRUPT
+                ├► LevelMeter（每 1s 报 RMS/active RMS/peak）
+                └► 8s 回放缓冲 ─► 打断切片 ─► direct_v3 TH=0.0 句级复核
+                                      │ 放行（不确定也放行；关闭不撤销打断）
+                                      ▼
+                              恒定增益校准 ─► TSE ─► PVAD 帧掩码 ─► ASR
+
+注册 wav ─┬► 恒定增益校准 ─► 多尺度编码器 ─► 4288 维 TSE 嵌入（不做向量 L2 归一化）
+          └► 原始电平 ─► 多尺度编码器 ─► deep-192 direct_v3 引用（懒计算缓存）
+```
+
+- `agc_normalize` 以 10ms 帧 RMS>0.003 定义有效语音，目标有效 RMS=0.045；整个切片
+  只使用一个增益（0.1~12），峰值不超过 0.95。不得改成逐帧/中途变增益：上游实测增益
+  切换会经 GRU/EMA 长记忆产生 AM 伪影。
+- `TseSpeakerEncoder::encode_one` 与 `tse_extract` 都在 STFT 前调用同一校准函数；PVAD
+  的 fbank、CMVN、GRU 状态和门控判定完全不受影响。
+- `DirectGate` 加载 `direct_v3.onnx`，输入 `[N,192]` 窗嵌入与 `[192]` 注册引用，输出
+  identity/confidence；`encode_windows` 固定 3s/1s hop 且 `apply_agc=false`，与 Python
+  对照路径一致。注册变化使 `direct_ref_` 失效，下次复核懒重算。
+- 持久化段以 `tse_emb_agc:true` 标记新校准版本；旧段缺省 false，启动时从来源 wav 重算。
+- `LevelMeter` 支持任意采集分块；`measure()` 不清状态，开始新 1s 窗口前显式 `reset()`。

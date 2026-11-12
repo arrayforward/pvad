@@ -1,5 +1,6 @@
 // tse_chain.cpp
 #include "tse_chain.h"
+#include "agc.h"
 #include "dsp_tse.h"
 #include <onnxruntime_cxx_api.h>
 #include <stdexcept>
@@ -18,9 +19,12 @@ TseSpeakerEncoder::TseSpeakerEncoder(const std::string& model_path) {
 
 TseSpeakerEncoder::~TseSpeakerEncoder() = default;
 
-std::vector<float> TseSpeakerEncoder::encode_one(const float* pcm, int n) {
+std::vector<float> TseSpeakerEncoder::encode_one(const float* pcm, int n, bool apply_agc) {
+    // 只归一化音频电平；4288 维嵌入本身保持原样，严禁再做 L2 归一化。
+    std::vector<float> normalized = apply_agc
+        ? agc_normalize(pcm, (size_t)n) : std::vector<float>(pcm, pcm + n);
     std::vector<std::vector<float>> re, im;
-    stft(pcm, n, re, im);
+    stft(normalized.data(), n, re, im);
     int T = (int)re.size();
     std::vector<float> flat((size_t)T * ERB_BANDS);
     for (int f = 0; f < T; f++)
@@ -41,14 +45,36 @@ std::vector<float> TseSpeakerEncoder::encode_one(const float* pcm, int n) {
     return std::vector<float>(p, p + total);
 }
 
-std::vector<float> TseSpeakerEncoder::encode(const std::vector<std::vector<float>>& segments) {
+std::vector<float> TseSpeakerEncoder::encode(
+        const std::vector<std::vector<float>>& segments, bool apply_agc) {
     if (segments.empty()) throw std::runtime_error("no segments");
     std::vector<float> out(EMB_DIM, 0.f);
     for (auto& s : segments) {
-        auto e = encode_one(s.data(), (int)s.size());
+        auto e = encode_one(s.data(), (int)s.size(), apply_agc);
         for (int i = 0; i < EMB_DIM; i++) out[i] += e[i];
     }
     for (int i = 0; i < EMB_DIM; i++) out[i] /= (float)segments.size();
+    return out;
+}
+
+std::vector<std::vector<float>> TseSpeakerEncoder::encode_windows(const float* pcm, int n) {
+    constexpr int W = 3 * SR, H = SR;
+    std::vector<int> starts;
+    if (n <= W) {
+        starts.push_back(0);
+    } else {
+        for (int s = 0; s + W <= n; s += H) starts.push_back(s);
+        if (starts.back() + W < n) starts.push_back(n - W);
+    }
+    std::vector<std::vector<float>> out;
+    for (int s : starts) {
+        std::vector<float> seg(W, 0.f);
+        int count = std::min(W, std::max(0, n - s));
+        if (count > 0) std::copy(pcm + s, pcm + s + count, seg.begin());
+        auto e = encode_one(seg.data(), W, false);  // direct_v3 对照路径：原始电平
+        e.resize(192);
+        out.push_back(std::move(e));
+    }
     return out;
 }
 
@@ -137,9 +163,11 @@ void TseEngine::step(const float* xr, const float* xi, std::vector<float>& sr, s
     }
 }
 
-std::vector<float> tse_extract(TseEngine& eng, const float* pcm, int n) {
+std::vector<float> tse_extract(TseEngine& eng, const float* pcm, int n,
+                               AgcReport* report) {
+    std::vector<float> normalized = agc_normalize(pcm, (size_t)n, 0.045f, report);
     std::vector<std::vector<float>> re, im;
-    stft(pcm, n, re, im);
+    stft(normalized.data(), n, re, im);
     int T = (int)re.size();
     if (T < TseEngine::CHUNK) return {};
     // 尾块零填充凑满 CHUNK（与参考实现一致：因果模型前 k 帧输出不受影响），

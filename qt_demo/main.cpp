@@ -50,6 +50,7 @@ static int probe_audio() {
 }
 
 int main(int argc, char** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);  // 无头回归异常退出时保留最后进度
     QStringList args;
     for (int i = 0; i < argc; i++) args << QString::fromLocal8Bit(argv[i]);
 
@@ -71,6 +72,8 @@ int main(int argc, char** argv) {
     if (args.contains("--persist-test")) return run_persist_test(DEMO_ROOT);
 
     if (args.contains("--ui-state-test")) return run_ui_state_test();
+
+    if (args.contains("--agc-test")) return run_agc_test();
 
     if (args.contains("--tse-smoke")) return run_tse_smoke(DEMO_ROOT);
 

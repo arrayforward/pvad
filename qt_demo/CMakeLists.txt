@@ -19,6 +19,7 @@ set(TTS_MODEL_DIR "D:/vit/tts/models/vits-piper-zh_CN-huayan-medium" CACHE PATH 
 
 # 管线核心（复用 ../src，不含 AEC/speexdsp mdf、不含 silero vad——demo 走 pvad 门控）
 add_library(pipe STATIC
+    ${PROJ_ROOT}/src/agc.cpp
     ${PROJ_ROOT}/src/fbank.cpp
     ${PROJ_ROOT}/src/speaker.cpp
     ${PROJ_ROOT}/src/pvad.cpp
@@ -62,6 +63,7 @@ add_executable(pvad_demo
     asr.h asr.cpp
     dsp_tse.h dsp_tse.cpp
     tse_chain.h tse_chain.cpp
+    direct_gate.h direct_gate.cpp
     autotest.h autotest.cpp
 )
 target_include_directories(pvad_demo PRIVATE

@@ -15,10 +15,14 @@ public:
     TseSpeakerEncoder(const TseSpeakerEncoder&) = delete;
     TseSpeakerEncoder& operator=(const TseSpeakerEncoder&) = delete;
     static constexpr int EMB_DIM = 4288;
-    // 多段 16k 单声道 -> 逐段提取后均值（与 Kotlin encode() 一致）
-    std::vector<float> encode(const std::vector<std::vector<float>>& segments);
+    // 多段 16k 单声道 -> 逐段提取后均值（与 Kotlin encode() 一致）。
+    // apply_agc=false 供 direct_v3 二级复核复现其原始训练输入；TSE 默认 true。
+    std::vector<float> encode(const std::vector<std::vector<float>>& segments,
+                              bool apply_agc = true);
+    // direct_v3：3s 窗 / 1s hop，短句零Padding到3s；返回每窗 deep-192（不做音频 AGC）。
+    std::vector<std::vector<float>> encode_windows(const float* pcm, int n);
 private:
-    std::vector<float> encode_one(const float* pcm, int n);
+    std::vector<float> encode_one(const float* pcm, int n, bool apply_agc);
     std::unique_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::Session> session_;
 };
@@ -41,5 +45,8 @@ private:
     std::vector<std::vector<float>> states_;  // 28 个状态，按名称序
 };
 
-// 整段提取：单声道 pcm → STFT → 4ch 铺展（各通道相同，单麦模拟）→ 逐 chunk step → ISTFT
-std::vector<float> tse_extract(TseEngine& eng, const float* pcm, int n);
+struct AgcReport;
+// 整段提取：单声道 pcm → AGC(有效语音 RMS=0.045) → STFT → 4ch 铺展 → 逐 chunk step → ISTFT
+// report 非空时返回 AGC 前后电平与实际增益。
+std::vector<float> tse_extract(TseEngine& eng, const float* pcm, int n,
+                               AgcReport* report = nullptr);

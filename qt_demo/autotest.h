@@ -17,6 +17,9 @@ int run_persist_test(const std::string& root);
 // UI 状态机/背压决策无头验证（UiState 转移 + Backpressure 丢帧语义）
 int run_ui_state_test();
 
+// 电平计与 AGC 无头验证（--agc-test）：目标 RMS、静音、峰值与分块一致性
+int run_agc_test();
+
 // TSE 链路冒烟（--tse-smoke）：多尺度声纹注册 + e16 step 提取 + ASR 对照
 int run_tse_smoke(const std::string& root);
 

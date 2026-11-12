@@ -139,6 +139,7 @@ bool EnrollStore::save(const std::string& dir, const std::vector<SegRecord>& seg
                 for (size_t j = 0; j < s.tse_emb.size(); j++)
                     fprintf(f, "%s%.9g", j ? ", " : "", (double)s.tse_emb[j]);
                 fprintf(f, "]");
+                if (s.tse_emb_agc) fprintf(f, ", \"tse_emb_agc\": true");
             }
             fprintf(f, "}%s\n", i + 1 < segs.size() ? "," : "");
         }
@@ -197,6 +198,8 @@ bool EnrollStore::load(const std::string& dir, std::vector<SegRecord>& segs,
                 }
                 jtokens(rec, s.tokens);  // 可选字段（旧格式无 tokens -> 空，走重算升级路径）
                 jfloats(rec, "tse_emb", s.tse_emb);  // 可选字段（旧格式无 -> 空，Engine 加载时从 wav 重算）
+                // 旧文件没有该标记：保留旧嵌入用于降级，但 Engine 会优先从 wav 按 AGC 重算。
+                s.tse_emb_agc = rec.find("\"tse_emb_agc\": true") != std::string::npos;
                 segs.push_back(std::move(s));
                 pos = p + 1;
             }

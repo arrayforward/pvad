@@ -9,8 +9,10 @@
 #include <deque>
 #include <mutex>
 #include <vector>
+#include "agc.h"
 #include "demo_core.h"
 #include "denoise.h"
+#include "direct_gate.h"
 #include "enroll_store.h"
 #include "fbank.h"
 #include "pvad_stream.h"
@@ -73,7 +75,8 @@ private:
     void closeDevices();
     void handleEvent(const FrameEvent& ev);
     bool ensureTseEmb();            // 给缺 tse_emb 的注册段从 wav 补算，并更新 tse_emb_ 均值；返回是否有补算
-    void finalizeCollect();         // 收集结束：hist_ 切片 → TSE 提取 → ASR → asrText
+    bool ensureDirectRef();         // 二级复核用原始电平 deep-192（懒计算，不改持久化声纹）
+    void finalizeCollect();         // 收集结束：direct_v3 复核 → TSE 提取 → ASR → asrText
     void finishRecord();
     void persistEnrollment();       // 注册状态变化后落盘 enrollment/
     void refreshStreamEnroll();     // 同步流式 PVAD 的 emb/CMVN 先验
@@ -122,6 +125,8 @@ private:
     // ---- 打断后 TSE+ASR 链（听故事打断演示） ----
     std::unique_ptr<TseSpeakerEncoder> tse_enc_;   // 多尺度 4288 编码器
     std::vector<float> tse_emb_;                   // 注册声纹（4288 维均值）
+    std::unique_ptr<DirectGate> direct_gate_;      // v7b 触发后的 direct_v3 句级复核
+    std::vector<float> direct_ref_;                // 原始电平注册 deep-192 均值
     std::deque<float> hist_;                       // 监听中 post-denoise 音频环形缓冲（封顶 8s）
     std::deque<float> pvec_;                       // 与 hist_ 对齐的每帧 P(target)（帧掩码用）
     size_t hist_base_frame_ = 0;                   // hist_.front() 对应的绝对帧号
@@ -140,4 +145,6 @@ private:
     qint64 stats_frames_ = 0;             // 本次监听已处理帧数
     qint64 stats_window_start_ms_ = 0;    // 处理率统计窗口起点
     qint64 stats_window_frames_ = 0;
+    LevelMeter level_meter_;              // 1s 麦克风电平窗口（post-RNNoise）
+    qint64 last_level_log_ms_ = 0;
 };

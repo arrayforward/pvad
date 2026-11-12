@@ -27,6 +27,7 @@ struct SegRecord {
     std::vector<float> emb; // 该段 L2 归一化 embedding（192 维）
     std::vector<std::vector<float>> tokens;  // 该段 1s 子帧 tokens（v5 交叉注意力用）
     std::vector<float> tse_emb; // 该段 TSE 注册嵌入（4288 维多尺度均值，可为空）
+    bool tse_emb_agc = false;   // 提取前是否已做 RMS=0.045 音频 AGC（旧格式 false，启动时升级）
 };
 
 class DemoCore {

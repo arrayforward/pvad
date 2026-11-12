@@ -4,8 +4,10 @@
 // 场景2「真人录音打断 TTS」: TTS 虚拟播放中注入 voice1b(注册用户)，预期触发 INTERRUPT 且
 //         虚拟播放在触发时刻被停止; 再注入 voice2(非注册)，预期不触发
 #include "autotest.h"
+#include "agc.h"
 #include "demo_core.h"
 #include "denoise.h"
+#include "direct_gate.h"
 #include "enroll_store.h"
 #include "speaker.h"
 #include "tse_chain.h"
@@ -361,6 +363,9 @@ int run_persist_test(const std::string& root) {
         printf("[persist-test] enroll failed: %s\n", err.c_str());
         return 1;
     }
+    // TSE AGC 版本标记也必须持久化；旧文件缺省 false，由 Engine 从 wav 重算升级。
+    core.segments_mut()[0].tse_emb = {1.0f, 2.0f, 3.0f};
+    core.segments_mut()[0].tse_emb_agc = true;
     if (!EnrollStore::save(dir, core.segments(), core.centroid(), core.fbank_mean(), err)) {
         printf("[persist-test] save failed: %s\n", err.c_str());
         return 1;
@@ -375,6 +380,12 @@ int run_persist_test(const std::string& root) {
         printf("[persist-test] load failed: %s\n", err.c_str());
         return 1;
     }
+    bool tse_agc_ok = segs.size() == 2 && segs[0].tse_emb_agc &&
+                      segs[0].tse_emb == std::vector<float>({1.0f, 2.0f, 3.0f}) &&
+                      !segs[1].tse_emb_agc;
+    printf("PERSIST tse-agc-version-roundtrip: ok=%d -> %s\n", (int)tse_agc_ok,
+           tse_agc_ok ? "PASS" : "FAIL");
+    if (!tse_agc_ok) fails++;
     DemoCore core2;
     core2.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v5.onnx", err);
     core2.set_segments(segs);
@@ -576,6 +587,66 @@ int run_ui_state_test() {
     }
 
     printf("[ui-state-test] %s\n", fails == 0 ? "ALL PASS" : "HAS FAILURES");
+    return fails == 0 ? 0 : 1;
+}
+
+// ---------------- 电平计 / AGC（--agc-test） ----------------
+int run_agc_test() {
+    int fails = 0;
+    auto check = [&](const char* name, bool cond) {
+        printf("AGC %-44s %s\n", name, cond ? "PASS" : "FAIL");
+        if (!cond) fails++;
+    };
+    auto tone = [](float amp, size_t n) {
+        std::vector<float> x(n);
+        for (size_t i = 0; i < n; i++)
+            x[i] = amp * std::sin(2.0 * 3.14159265358979323846 * 440.0 * i / 16000.0);
+        return x;
+    };
+
+    for (float amp : {0.01f, 0.4f}) {
+        auto x = tone(amp, 16000 * 2);
+        AgcReport r;
+        auto y = agc_normalize(x.data(), x.size(), 0.045f, &r);
+        printf("[agc-test] amp=%.3f RMS %.5f->%.5f active %.5f->%.5f gain=%.3f peak=%.3f\n",
+               amp, r.before.rms, r.after.rms, r.before.active_rms, r.after.active_rms,
+               r.gain, r.after.peak);
+        check("target active RMS = 0.045 +/- 0.001",
+              std::fabs(r.after.active_rms - 0.045f) < 0.001f);
+        check("output has no clipping", r.after.clipped == 0 && r.after.peak <= 0.95f + 1e-6f);
+    }
+    {
+        std::vector<float> zeros(16000, 0.f);
+        auto y = agc_normalize(zeros.data(), zeros.size());
+        float peak = 0.f;
+        for (float v : y) peak = std::max(peak, std::fabs(v));
+        check("digital silence remains digital silence", peak == 0.f);
+    }
+    {
+        auto quiet = tone(0.001f, 16000);  // 全部低于 -50.5dBFS 活动门限
+        AgcReport r;
+        auto y = agc_normalize(quiet.data(), quiet.size(), 0.045f, &r);
+        check("sub-gate noise gets max gain, not target boost",
+              r.gain == 12.0f && r.after.rms < 0.009f);
+    }
+    {
+        auto x = tone(0.02f, 16000);
+        LevelMeter a, b;
+        a.add(x.data(), x.size());
+        size_t off = 0;
+        for (size_t chunk : {1, 7, 160, 31, 400, 1600}) {
+            while (off < x.size()) {
+                size_t n = std::min(chunk, x.size() - off);
+                b.add(x.data() + off, n);
+                off += n;
+            }
+        }
+        AudioLevel ma = a.measure(), mb = b.measure();
+        check("meter is chunking invariant",
+              ma.rms == mb.rms && ma.active_rms == mb.active_rms &&
+              ma.peak == mb.peak && ma.clipped == mb.clipped);
+    }
+    printf("[agc-test] %s\n", fails == 0 ? "ALL PASS" : "HAS FAILURES");
     return fails == 0 ? 0 : 1;
 }
 
@@ -807,9 +878,25 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
            coll_end * 0.01);
 
     TseSpeakerEncoder enc(root + "/models/tse_e16/speaker_encoder.onnx");
+    // 与 Engine 一致：v7b 已触发后，direct_v3 TH=0.0 只复核 ASR 输入，不撤销打断。
+    DirectGate review(root + "/models/tse_e16/direct_v3.onnx", 0.0f, 0.3f);
+    auto raw_ref = enc.encode({wa.samples}, false);
+    raw_ref.resize(192);
+    auto review_a = review.decide(enc.encode_windows(seg.data(), (int)seg.size()), raw_ref);
+    printf("[story-test] direct-v3 A identity=%.5f confidence=%.5f closed=%d\n",
+           review_a.identity, review_a.confidence, (int)review_a.closed);
+    if (review_a.closed) {
+        printf("STORY direct-v3-review-open-A: closed -> FAIL\n");
+        return 1;
+    }
+    printf("STORY direct-v3-review-open-A: identity %.3f -> PASS\n", review_a.identity);
     auto temb = enc.encode({wa.samples});
     TseEngine tse(root + "/models/tse_e16/erb_df_step.onnx", temb);
-    auto ext = tse_extract(tse, seg.data(), (int)seg.size());
+    AgcReport agc;
+    auto ext = tse_extract(tse, seg.data(), (int)seg.size(), &agc);
+    printf("[story-test] AGC RMS %.5f->%.5f (%.1f->%.1f dBFS), active %.5f->%.5f, gain=%.3f peak %.3f->%.3f\n",
+           agc.before.rms, agc.after.rms, agc.before.rms_dbfs(), agc.after.rms_dbfs(),
+           agc.before.active_rms, agc.after.active_rms, agc.gain, agc.before.peak, agc.after.peak);
     if (ext.empty()) {
         printf("STORY tse-extract: empty -> FAIL\n");
         return 1;
