@@ -242,6 +242,66 @@ windeployqt 自动拷贝；sherpa/onnxruntime DLL 一并拷贝（onnxruntime.dll
   tpl.bin CLI 互操作、CLI tpl 导入、损坏文件降级，ALL PASS）
 - `--ui-state-test`：按钮使能状态机与背压决策无头验证（监听中点停止→回 idle→朗读可用、
   向导中朗读禁用、录音互斥、背压丢帧语义，ALL PASS）
+- `--tse-smoke`：TSE 链路冒烟（多尺度声纹注册 → e16 step 提取 → ASR 对照，无断言）
+- `--story-test`：听故事打断全链无头验证（见 4.5）
+
+### 4.5 听故事打断演示（PVAD 守门 → TSE 提取 → ASR 出字）
+
+GUI 完整链路：**麦克风 → RNNoise → PVAD v7b_stream 守门 → 打断后 0.5s 回放缓冲切片 →
+TSE 提取注册用户声音 → sherpa-onnx Paraformer-zh ASR → 文本上屏**。
+
+- **TTS 区故事下拉**：内置 4 个中文民间故事（龟兔赛跑/愚公移山/孔融让梨/狼来了），
+  选中即填入朗读文本框，点 `朗读` 播放
+- **打断转写区**：勾选 `仅保留注册用户声音` 后，监听中一旦 PVAD 触发打断，从触发帧
+  -0.5s 起收集用户语音（VAD 静音或 6s 封顶），TSE 提取后 ASR 出字显示在
+  「打断转写」区。**TTS 朗读文本永远不会进入该区域**（该区域只接 ASR 输出）
+- **单麦模拟折损**：e16 TSE 模型按 4 通道输入训练，demo 将单声道复制到 4 通道
+  （各通道相同，无空间信息），分离效果较官方多麦数据有折损——python 参考链路
+  （tse-gitee OnnxStepRunner + 同一 onnx）在单麦复制输入上输出与输入的相关达
+  0.974（近似直通），折损是模型固有的而非移植误差。因此提取后再加一道
+  **PVAD 帧级掩码**：收集区间内 P(target)<0.5 的帧（±1 帧膨胀保留）置零，
+  保证故事文本不进 ASR 区
+- **ASR 模型不进 git**（238MB），首次使用前下载：
+  ```bash
+  mkdir -p third_party/models
+  curl -L -o /tmp/paraformer.tar.bz2 \
+    https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-paraformer-zh-int8-2025-10-07.tar.bz2
+  tar xjf /tmp/paraformer.tar.bz2 -C third_party/models
+  mv third_party/models/sherpa-onnx-paraformer-zh-int8-2025-10-07 third_party/models/paraformer-zh-int8
+  ```
+  可用 `ASR_MODEL_DIR` 环境变量覆盖路径。TSE 两个模型
+  （`models/tse_e16/erb_df_step.onnx` 40.9MB + `speaker_encoder.onnx` 5.2MB）随仓库提交。
+- **注册联动**：每段注册除 CAM++ 192 维 embedding 外，顺带算 TSE 4288 维多尺度声纹
+  存入 `segments.json` 的 `tse_emb` 字段（可选字段，旧格式文件加载时从来源 wav 补算，
+  wav 已删则降级警告）
+- **会话冷启动保护**：会话起始 0.5s 内 PvadStream 的分数不入门控（`o.gated`），
+  压掉 EMA/GRU 暂态造成的冷启动 blip（story-test 复现：故事开播 0.40s 处
+  P 短暂冲到 0.59 的假触发）
+
+无头验证 `--story-test`：TTS 合成故事（缓存 `test_audio/story_tts.wav` 保证可复现，
+删除即重新合成）→ voice1b 在 2s 处以全量混入、story 以 0.45 增益模拟外放回声
+（`--story-gain`/`--mask-thr` 可调参复现下表）→ 完整走 PVAD 守门（与 Engine
+麦克风路径同一状态机）→ 触发帧-0.5s 切片 → TSE → PVAD 帧掩码 → ASR。断言：
+
+1. PVAD 必须触发打断，且触发帧落在 voice1b 混入之后（2s<t<6s，防冷启动 blip
+   使测试形同虚设）
+2. 故事文本泄漏率（干扰文本在识别结果中的 LCS 字符召回）≤0.15
+3. 对照组（同一切片直接 ASR 混合音）泄漏率明显高于提取组（差值 >0.1）
+4. ASR 输出含注册用户内容（voice1b 文本 LCS 召回 ≥0.2）
+
+**如实记录（2026-11-12 实测，huayan 故事 + SAPI voice1b）**：单麦模拟下 TSE 压制有限，
+指标对回声增益敏感；断言 2/3/4 的通过线按默认配置（gain 0.45, mask 0.5）标定——
+SAPI 注册人是已知弱目标（USAGE 5.3），真实人声的余量更大：
+
+| story 增益 | 掩码阈值 | 触发时刻 | leak(ext) | leak(mix) | 目标召回 |
+|---|---|---|---|---|---|
+| 0.45 | 0.50（默认） | 2.45s ✓ | 0.125 | 0.359 | 0.250 |
+| 0.45 | 0.45 | 2.45s ✓ | 0.219 | 0.359 | 0.321 |
+| 0.60 | 0.50 | 2.54s ✓ | 0.172 | 0.359 | 0.179 |
+| 0.60 | 0.35 | 2.54s ✓ | 0.328 | 0.328 | 0.143（掩码阈值过低等同不掩） |
+| 0.30 | 0.35 | 0.77s ✗（冷启动 blip） | 0.172 | 0.281 | 0.500 |
+
+中间产物写到 `qt_demo/recordings/_tmp_story_{mix,seg,ext,ext_masked}.wav` 便于人工试听核对。
 
 ### 4.4 模型版本切换
 

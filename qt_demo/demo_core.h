@@ -26,6 +26,7 @@ struct SegRecord {
     std::string time;       // 录入时间 "yyyy-MM-dd HH:mm:ss"
     std::vector<float> emb; // 该段 L2 归一化 embedding（192 维）
     std::vector<std::vector<float>> tokens;  // 该段 1s 子帧 tokens（v5 交叉注意力用）
+    std::vector<float> tse_emb; // 该段 TSE 注册嵌入（4288 维多尺度均值，可为空）
 };
 
 class DemoCore {
@@ -67,6 +68,8 @@ public:
     // 全部段的 tokens 按序拼接（v5 模型输入）
     std::vector<std::vector<float>> all_tokens() const;
     const std::vector<SegRecord>& segments() const { return segs_; }
+    // 可变访问：Engine 补算 tse_emb 等段级字段用（不改 emb/emb_sum 一致性字段）
+    std::vector<SegRecord>& segments_mut() { return segs_; }
     const std::vector<float>& centroid() const { return centroid_; }
     bool enrolled() const { return has_tpl_; }
     int enroll_count() const { return n_emb_; }

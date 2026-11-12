@@ -76,11 +76,18 @@ MainWindow::MainWindow() {
     vbox->addWidget(wizard_box_);
 
     // TTS 区
-    auto* g_tts = new QGroupBox("TTS", this);
+    auto* g_tts = new QGroupBox("TTS（可选内置故事，选中即填入朗读文本）", this);
     auto* h2 = new QHBoxLayout(g_tts);
+    story_combo_ = new QComboBox(g_tts);
+    story_combo_->addItem("选择内置故事…");
+    story_combo_->addItem("龟兔赛跑", "兔子嘲笑乌龟爬得慢，乌龟不服气，决定和兔子比赛跑步。兔子一溜烟跑远了，回头看不见乌龟，就在树下睡起大觉。乌龟一步一步不停地爬，等兔子醒来跑到终点时，乌龟早已在那里等着它了。");
+    story_combo_->addItem("愚公移山", "愚公家门前有两座大山，出行十分不便，他便带领子孙每天挖山不止。有人笑他愚蠢，说凭他这点力气怎么可能搬走大山。愚公回答说，我死了有儿子，儿子又有孙子，子子孙孙没有穷尽，而山不会再增高，怎么会挖不平呢。");
+    story_combo_->addItem("孔融让梨", "孔融四岁的时候，和哥哥们一起吃梨，他总是拿最小的一个。大人问他为什么，他说我年纪小，应该吃小的，大的留给哥哥们。大家听了，都夸他是个懂事的好孩子。");
+    story_combo_->addItem("狼来了", "从前有个放羊的孩子，觉得无聊就大喊狼来了，村民们急忙跑来救他，却发现被骗了。过了几天狼真的来了，孩子拼命呼喊求救，可村民们以为他又在撒谎，谁也没有来，结果他的羊都被狼叼走了。");
     text_edit_ = new QLineEdit("你好，现在开始为你播报一段消息，请耐心听完，不要打断我。", g_tts);
     speak_btn_ = new QPushButton("朗读", g_tts);
     tts_label_ = new QLabel("", g_tts);
+    h2->addWidget(story_combo_);
     h2->addWidget(text_edit_, 1);
     h2->addWidget(speak_btn_);
     h2->addWidget(tts_label_);
@@ -117,6 +124,19 @@ MainWindow::MainWindow() {
     h4->addWidget(prob_label_);
     h4->addWidget(gate_label_);
     vbox->addWidget(g_state);
+
+    // 打断转写区（TSE 提取注册用户声音 → ASR；单麦模拟 4ch，无空间信息，分离效果有折损）
+    auto* g_asr = new QGroupBox("打断转写（TSE+ASR，单麦模拟）", this);
+    auto* h5 = new QHBoxLayout(g_asr);
+    asr_box_ = new QCheckBox("仅保留注册用户声音", g_asr);
+    asr_edit_ = new QLineEdit(g_asr);
+    asr_edit_->setReadOnly(true);
+    asr_edit_->setPlaceholderText("打断后在此显示用户语音的识别结果（TTS 文本不会进入此区）");
+    keep_label_ = new QLabel("", g_asr);
+    h5->addWidget(asr_box_);
+    h5->addWidget(asr_edit_, 1);
+    h5->addWidget(keep_label_);
+    vbox->addWidget(g_asr);
 
     // 日志区
     log_edit_ = new QPlainTextEdit(this);
@@ -183,6 +203,18 @@ MainWindow::MainWindow() {
         QMetaObject::invokeMethod(engine_, "setDenoiseEnabled", Qt::QueuedConnection, Q_ARG(bool, on));
     });
     denoise_box_->setChecked(true);  // 降噪默认开（触发 toggled -> engine 创建 Denoise）
+    connect(story_combo_, &QComboBox::activated, this, [this](int idx) {
+        if (idx > 0) text_edit_->setText(story_combo_->itemData(idx).toString());
+    });
+    connect(asr_box_, &QCheckBox::toggled, this, [this](bool on) {
+        QMetaObject::invokeMethod(engine_, "setAsrEnabled", Qt::QueuedConnection, Q_ARG(bool, on));
+    });
+    connect(engine_, &Engine::asrText, this, [this](const QString& text) {
+        asr_edit_->setText(text);
+    });
+    connect(engine_, &Engine::keepRatio, this, [this](double r) {
+        keep_label_->setText(QString("保留 %1%").arg(r * 100.0, 0, 'f', 0));
+    });
 
     connect(engine_, &Engine::logLine, this, &MainWindow::log);
     connect(engine_, &Engine::enrollStatus, enroll_label_, &QLabel::setText);

@@ -1,6 +1,7 @@
 // mainwindow.h
 #pragma once
 #include <QCheckBox>
+#include <QComboBox>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
@@ -43,6 +44,7 @@ private:
     QPushButton* wiz_rec_btn_;
     QPushButton* wiz_cancel_btn_;
     QLineEdit* text_edit_;
+    QComboBox* story_combo_;
     QPushButton* speak_btn_;
     QLabel* tts_label_;
     QPushButton* listen_btn_;
@@ -55,6 +57,10 @@ private:
     QProgressBar* prob_bar_;
     QLabel* prob_label_;
     QLabel* gate_label_;
+    // 打断转写（TSE+ASR，仅注册用户声音）
+    QCheckBox* asr_box_;
+    QLineEdit* asr_edit_;
+    QLabel* keep_label_;
     QPlainTextEdit* log_edit_;
     QString inject_wav_;
     UiState ui_;

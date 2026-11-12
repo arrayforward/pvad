@@ -11,6 +11,7 @@ __pycache__/
 # 大体积预编译二进制（下载命令见 docs/USAGE.md「第三方依赖」）
 third_party/onnxruntime/
 third_party/sherpa-onnx/
+third_party/models/
 
 # qt_demo 录音产物
 qt_demo/recordings/

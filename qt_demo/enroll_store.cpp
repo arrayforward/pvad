@@ -134,6 +134,12 @@ bool EnrollStore::save(const std::string& dir, const std::vector<SegRecord>& seg
                 }
                 fprintf(f, "]");
             }
+            if (!s.tse_emb.empty()) {
+                fprintf(f, ", \"tse_emb\": [");
+                for (size_t j = 0; j < s.tse_emb.size(); j++)
+                    fprintf(f, "%s%.9g", j ? ", " : "", (double)s.tse_emb[j]);
+                fprintf(f, "]");
+            }
             fprintf(f, "}%s\n", i + 1 < segs.size() ? "," : "");
         }
         fprintf(f, "]}\n");
@@ -190,6 +196,7 @@ bool EnrollStore::load(const std::string& dir, std::vector<SegRecord>& segs,
                     return false;
                 }
                 jtokens(rec, s.tokens);  // 可选字段（旧格式无 tokens -> 空，走重算升级路径）
+                jfloats(rec, "tse_emb", s.tse_emb);  // 可选字段（旧格式无 -> 空，Engine 加载时从 wav 重算）
                 segs.push_back(std::move(s));
                 pos = p + 1;
             }

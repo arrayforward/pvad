@@ -93,6 +93,27 @@ void Engine::init() {
     } catch (const std::exception& e) {
         emit logLine("流式 PVAD 加载失败（麦克风监听不可用）: " + QString::fromStdString(e.what()));
     }
+    // 打断后 TSE+ASR 链（听故事打断演示）：加载失败仅降级，不影响监听主功能
+    try {
+        tse_enc_ = std::make_unique<TseSpeakerEncoder>(
+            (root + "/models/tse_e16/speaker_encoder.onnx").toStdString());
+        emit logLine("TSE 声纹编码器已加载 (tse_e16/speaker_encoder)");
+        if (core_.enrolled() && ensureTseEmb()) persistEnrollment();
+    } catch (const std::exception& e) {
+        tse_enc_.reset();
+        emit logLine("TSE 声纹编码器加载失败（打断转写不可用）: " + QString::fromStdString(e.what()));
+    }
+    {
+        asr_ = std::make_unique<Asr>();
+        QString asr_dir = qEnvironmentVariable("ASR_MODEL_DIR",
+                                               root + "/third_party/models/paraformer-zh-int8");
+        if (asr_->init(asr_dir.toStdString(), e))
+            emit logLine("ASR 已加载 (" + asr_dir + ")");
+        else {
+            asr_.reset();
+            emit logLine("ASR 加载失败（打断转写不可用）: " + QString::fromStdString(e));
+        }
+    }
     QString tts_dir = qEnvironmentVariable("TTS_MODEL_DIR", TTS_MODEL_DIR);
     if (tts_.init(tts_dir.toStdString(), e)) emit ttsStatus("TTS 就绪 (" + tts_dir + ")");
     else emit ttsStatus("TTS 初始化失败: " + QString::fromStdString(e));
@@ -122,6 +143,7 @@ QString Engine::enrollmentDir() const {
 }
 
 void Engine::persistEnrollment() {
+    if (tse_enc_ && core_.enrolled()) ensureTseEmb();  // 新段顺带补算 TSE 声纹
     std::string e;
     if (EnrollStore::save(enrollmentDir().toStdString(), core_.segments(), core_.centroid(),
                           core_.fbank_mean(), e)) {
@@ -140,6 +162,109 @@ void Engine::refreshStreamEnroll() {
         auto m = core_.fbank_mean();
         if (!m.empty()) stream_->set_cmvn_prior(m.data());
     }
+}
+
+// 给缺 tse_emb 的注册段从来源 wav 补算（与 rebuild_missing_tokens 同一路径解析），
+// 并刷新 tse_emb_（各段均值，TSE 提取的目标声纹）。返回是否有段被补算。
+bool Engine::ensureTseEmb() {
+    if (!tse_enc_) return false;
+    std::string qtd = (qEnvironmentVariable("DEMO_ROOT", DEMO_ROOT) + "/qt_demo").toStdString();
+    auto& segs = core_.segments_mut();
+    bool changed = false;
+    int failed = 0;
+    for (auto& s : segs) {
+        if (!s.tse_emb.empty()) continue;
+        if (s.wav.empty() || s.wav == "(imported tpl.bin)") continue;
+        std::string path = s.wav;
+        FILE* probe = fopen(path.c_str(), "rb");
+        if (!probe) {
+            std::string alt = qtd + "/" + s.wav;
+            probe = fopen(alt.c_str(), "rb");
+            if (probe) path = alt;
+        }
+        if (!probe) { failed++; continue; }
+        fclose(probe);
+        try {
+            WavData wd = read_wav(path);
+            s.tse_emb = tse_enc_->encode({wd.samples});
+            changed = true;
+        } catch (...) {
+            failed++;
+        }
+    }
+    if (failed > 0)
+        emit logLine(QString("警告：%1 段注册无法补算 TSE 声纹（录音已删？），打断转写将降级").arg(failed));
+    // 均值（所有有 tse_emb 的段）
+    tse_emb_.assign(TseSpeakerEncoder::EMB_DIM, 0.f);
+    int n = 0;
+    for (const auto& s : segs) {
+        if (s.tse_emb.empty()) continue;
+        for (size_t i = 0; i < tse_emb_.size(); i++) tse_emb_[i] += s.tse_emb[i];
+        n++;
+    }
+    if (n > 0) {
+        for (auto& v : tse_emb_) v /= (float)n;
+    } else {
+        tse_emb_.clear();
+    }
+    return changed;
+}
+
+void Engine::setAsrEnabled(bool on) {
+    asr_enabled_ = on;
+    if (on && (!tse_enc_ || !asr_ || tse_emb_.empty()))
+        emit logLine("注意：TSE/ASR 未就绪或未注册，打断转写不会生效");
+    emit logLine(on ? "打断转写已开启（TSE 提取 → ASR，仅注册用户声音）" : "打断转写已关闭");
+}
+
+// 收集结束：hist_ 切片（触发帧-0.5s 起）→ TSE 提取 → ASR → asrText
+void Engine::finalizeCollect() {
+    collecting_ = false;
+    // finalize 期间采集仍在积压，清掉避免结束后处理陈旧帧
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        capq_.clear();
+    }
+    if (!tse_enc_ || !asr_ || tse_emb_.empty()) return;
+    size_t start_frame = collect_from_ > hist_base_frame_ ? collect_from_ : hist_base_frame_;
+    size_t off = (start_frame - hist_base_frame_) * 160;
+    if (off >= hist_.size()) return;
+    std::vector<float> seg(hist_.begin() + (ptrdiff_t)off, hist_.end());
+    double sec = seg.size() / 16000.0;
+    if (seg.size() < 16000 / 2) {
+        emit logLine(QString("打断语音太短（%1s），跳过转写").arg(sec, 0, 'f', 2));
+        return;
+    }
+    emit logLine(QString("打断转写：截取 %1s，TSE 提取中（单麦模拟 4ch）...").arg(sec, 0, 'f', 2));
+    QString root = qEnvironmentVariable("DEMO_ROOT", DEMO_ROOT);
+    std::vector<float> ext;
+    try {
+        TseEngine eng((root + "/models/tse_e16/erb_df_step.onnx").toStdString(), tse_emb_);
+        ext = tse_extract(eng, seg.data(), (int)seg.size());
+    } catch (const std::exception& e) {
+        emit logLine("TSE 提取失败: " + QString::fromStdString(e.what()));
+        return;
+    }
+    emit keepRatio(seg.empty() ? 0.0 : (double)ext.size() / (double)seg.size());
+    if (ext.empty()) { emit logLine("TSE 提取为空"); return; }
+    // PVAD 帧级掩码：单麦模拟下 TSE 压制有限，用 P(target) 把非目标帧清零
+    // （阈值 0.5，±1 帧膨胀保留），保证 TTS 文本不进 ASR 区
+    {
+        size_t nf = ext.size() / 160;
+        for (size_t f = 0; f < nf; f++) {
+            size_t af = start_frame + f;  // 绝对帧号（与 pvec_ 对齐）
+            long k0 = (long)af - (long)hist_base_frame_;
+            float p  = (k0 >= 0 && k0 < (long)pvec_.size()) ? pvec_[k0] : 0.f;
+            float pl = (k0 - 1 >= 0 && k0 - 1 < (long)pvec_.size()) ? pvec_[k0 - 1] : 0.f;
+            float pr = (k0 + 1 >= 0 && k0 + 1 < (long)pvec_.size()) ? pvec_[k0 + 1] : 0.f;
+            if (p < 0.5f && pl < 0.5f && pr < 0.5f)
+                std::fill(ext.begin() + (ptrdiff_t)f * 160,
+                          ext.begin() + (ptrdiff_t)(f + 1) * 160, 0.f);
+        }
+    }
+    std::string text = asr_->decode(ext.data(), (int)ext.size());
+    emit logLine(QString("ASR 完成：%1").arg(QString::fromStdString(text)));
+    emit asrText(QString::fromStdString(text));
 }
 
 bool Engine::openPlayback(int sample_rate) {
@@ -234,6 +359,12 @@ void Engine::startListenMic() {
     warmup_left_ = 20;
     refreshStreamEnroll();
     interrupt_latched_ = false;
+    hist_.clear();
+    pvec_.clear();
+    hist_base_frame_ = 0;
+    mic_frame_ = 0;
+    collecting_ = false;
+    silence_run_ = 0;
     if (ma_device_start(&cap_) != MA_SUCCESS) { emit logLine("采集启动失败"); return; }
     listening_ = true;
     emit listenChanged(true);
@@ -359,6 +490,8 @@ void Engine::finishRecord() {
 
 void Engine::clearEnroll() {
     core_.clear_enroll();
+    tse_emb_.clear();
+    collecting_ = false;
     // 删除持久化文件（recordings/ 的 wav 保留）
     QString dir = enrollmentDir();
     QFile::remove(dir + "/tpl.bin");
@@ -474,6 +607,17 @@ void Engine::tick() {
         const float* src = frame;
         float dn[160];
         if (denoise_) { denoise_->process(frame, dn); src = dn; }
+        // 打断转写用回放缓冲：post-denoise 采样入 hist_（封顶 8s，8s=800 帧）
+        if (asr_enabled_) {
+            for (int i = 0; i < 160; i++) hist_.push_back(src[i]);
+            pvec_.push_back(0.f);
+            mic_frame_++;
+            while (hist_.size() > 16000 * 8) {
+                for (int i = 0; i < 160; i++) hist_.pop_front();
+                pvec_.pop_front();
+                hist_base_frame_++;
+            }
+        }
         // 长流会话策略（与 CLI StreamRunner 一致）：
         // 1) silero VAD 判语音的帧才入门控；2) VAD speech-end 会话分段复位
         // （只清 GRU state，保留 EMA/先验）；3) 复位后 warm-up 20 VAD 帧，confirm=4
@@ -487,6 +631,16 @@ void Engine::tick() {
             }
             svad_speech_ = sp;
         }
+        // 打断后收集结束判定：连续 0.4s 非语音（hangover 跨句间停顿）或满 6s
+        // （须在 !sp continue 之前检查）
+        if (collecting_) {
+            if (!sp) silence_run_++; else silence_run_ = 0;
+            bool end = silence_run_ >= 40 || (mic_frame_ - collect_from_ >= 600);
+            if (end) {
+                if (mic_frame_ - collect_from_ >= 30) finalizeCollect();
+                else { collecting_ = false; emit logLine("打断语音太短，取消转写"); }
+            }
+        }
         // 流式 PVAD：单帧 fbank（对齐 480 窗）+ chunk GRU 增量推理，每帧 O(1)
         for (int i = 0; i < 160; i++) swin_.push_back(src[i]);
         if (swin_.size() < 480) continue;
@@ -495,7 +649,10 @@ void Engine::tick() {
         sfbank_.compute_one(w, f80);
         swin_.erase(swin_.begin(), swin_.begin() + 160);
         auto o = stream_->push_frame(f80);
-        if (!o.valid || !sp) continue;
+        if (asr_enabled_ && !pvec_.empty()) pvec_.back() = o.p;
+        // !o.gated = 会话起始 0.5s warm-up（PvadStream 自带）：压会话冷启动 blip
+        // （EMA/GRU 暂态会让首个语音段前 ~0.4s 的 P 虚高过阈，story-test 复现）
+        if (!o.valid || !o.gated || !sp) continue;
         if (warmup_left_ > 0) { warmup_left_--; continue; }
         bool fire = sgate_.update(o.p);
         FrameEvent ev;
@@ -529,5 +686,15 @@ void Engine::handleEvent(const FrameEvent& ev) {
         emit interruptFired(ev.t);
         emit logLine(QString(">>> INTERRUPT @ %1s (P=%2)").arg(ev.t, 0, 'f', 2).arg(ev.p, 0, 'f', 3));
         if (playing_.load()) stopPlayback();
+        // 打断转写：从触发帧-0.5s 起收集用户语音（仅麦克风路径；注入模式跳过）
+        if (asr_enabled_ && !collecting_ && !inject_mode_ &&
+            tse_enc_ && asr_ && !tse_emb_.empty()) {
+            collecting_ = true;
+            silence_run_ = 0;
+            interrupt_frame_ = mic_frame_;
+            collect_from_ = mic_frame_ >= 50 ? mic_frame_ - 50 : hist_base_frame_;
+            if (collect_from_ < hist_base_frame_) collect_from_ = hist_base_frame_;
+            emit logLine("打断转写：开始收集语音（VAD 静音或 6s 截止）");
+        }
     }
 }

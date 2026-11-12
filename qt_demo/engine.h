@@ -17,6 +17,8 @@
 #include "tts.h"
 #include "vad.h"
 #include "wizard.h"
+#include "tse_chain.h"
+#include "asr.h"
 #include <miniaudio.h>
 
 class Engine : public QObject {
@@ -39,6 +41,7 @@ public slots:
     void startWizard();                   // 引导注册：备份旧注册并开始 3 段向导
     void cancelWizard();                  // 引导注册：取消并恢复旧注册
     void setDenoiseEnabled(bool on);      // 监听降噪（RNNoise），默认关
+    void setAsrEnabled(bool on);          // [仅保留注册用户声音]：打断后 TSE+ASR 出字
 
 signals:
     void logLine(QString);
@@ -56,6 +59,8 @@ signals:
     void wizardSegmentRejected(double seconds);    // 太短，重录本段
     void wizardFinished(int segments);
     void wizardCancelled();
+    void asrText(QString text);                    // TSE+ASR 后的用户语音文本
+    void keepRatio(double ratio);                  // 过滤模式：保留比例
 
 private slots:
     void tick();
@@ -67,6 +72,8 @@ private:
     bool openPlayback(int sample_rate);
     void closeDevices();
     void handleEvent(const FrameEvent& ev);
+    bool ensureTseEmb();            // 给缺 tse_emb 的注册段从 wav 补算，并更新 tse_emb_ 均值；返回是否有补算
+    void finalizeCollect();         // 收集结束：hist_ 切片 → TSE 提取 → ASR → asrText
     void finishRecord();
     void persistEnrollment();       // 注册状态变化后落盘 enrollment/
     void refreshStreamEnroll();     // 同步流式 PVAD 的 emb/CMVN 先验
@@ -111,6 +118,20 @@ private:
     Fbank sfbank_;
     bool svad_speech_ = false;            // 上一帧 VAD 语音判定
     int warmup_left_ = 20;                // 会话（分段）起始 warm-up VAD 帧数
+
+    // ---- 打断后 TSE+ASR 链（听故事打断演示） ----
+    std::unique_ptr<TseSpeakerEncoder> tse_enc_;   // 多尺度 4288 编码器
+    std::vector<float> tse_emb_;                   // 注册声纹（4288 维均值）
+    std::deque<float> hist_;                       // 监听中 post-denoise 音频环形缓冲（封顶 8s）
+    std::deque<float> pvec_;                       // 与 hist_ 对齐的每帧 P(target)（帧掩码用）
+    size_t hist_base_frame_ = 0;                   // hist_.front() 对应的绝对帧号
+    size_t mic_frame_ = 0;                         // 本次监听已入 hist_ 的绝对帧计数
+    bool collecting_ = false;                      // 打断后收集中
+    int silence_run_ = 0;                          // 连续非语音帧（收集 hangover）
+    size_t collect_from_ = 0;                      // 收集起点（触发帧 - 0.5s 回滚）
+    size_t interrupt_frame_ = 0;
+    bool asr_enabled_ = false;                     // [仅保留注册用户声音] 勾选
+    std::unique_ptr<Asr> asr_;
     // 背压/节流状态
     size_t drop_acc_ = 0;                 // 自上次日志以来丢弃的采样数
     qint64 last_drop_log_ms_ = 0;

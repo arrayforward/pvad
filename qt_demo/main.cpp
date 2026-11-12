@@ -72,6 +72,21 @@ int main(int argc, char** argv) {
 
     if (args.contains("--ui-state-test")) return run_ui_state_test();
 
+    if (args.contains("--tse-smoke")) return run_tse_smoke(DEMO_ROOT);
+
+    if (args.contains("--story-test")) {
+        std::string tts_dir = TTS_MODEL_DIR;
+        int idx = args.indexOf("--tts-model");
+        if (idx >= 0 && idx + 1 < args.size()) tts_dir = args[idx + 1].toStdString();
+        float sg = 0.45f;
+        int gi = args.indexOf("--story-gain");
+        if (gi >= 0 && gi + 1 < args.size()) sg = args[gi + 1].toFloat();
+        float mt = 0.5f;
+        int mi = args.indexOf("--mask-thr");
+        if (mi >= 0 && mi + 1 < args.size()) mt = args[mi + 1].toFloat();
+        return run_story_test(DEMO_ROOT, tts_dir, sg, mt);
+    }
+
     if (args.contains("--auto-test")) {
         std::string root = DEMO_ROOT;
         std::string tts_dir = TTS_MODEL_DIR;

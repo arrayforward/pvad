@@ -22,6 +22,9 @@ TTS 时**只有已注册用户 A 的语音可以打断播放**——TTS 自身�
 - **工具链**：enroll（注册/批量注册）、score（打分）、double_voice（离线/实时/批量回归管线）、
   pvad_demo（Qt6 图形 demo：引导式三段注册向导、TTS 朗读、麦克风/WAV 注入监听、
   `--auto-test`/`--wizard-test`/`--record-test`/`--probe-audio` 无头验证）
+- **听故事打断演示（qt_demo）**：PVAD 守门触发后，e16 TSE（单麦模拟 4ch）从混合音中
+  提取注册用户声音，sherpa-onnx Paraformer-zh ASR 出字上屏——TTS 文本不进识别区；
+  无头回归 `--story-test`（泄漏率对照断言，见 [docs/USAGE.md](docs/USAGE.md) 4.5 节）
 
 ## 系统效果（test 池 89 人，与训练/验证零重叠；漏打断 / 误打断 / **正确率**）
 

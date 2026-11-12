@@ -59,6 +59,9 @@ add_executable(pvad_demo
     wizard.h wizard.cpp
     enroll_store.h enroll_store.cpp
     tts.h tts.cpp
+    asr.h asr.cpp
+    dsp_tse.h dsp_tse.cpp
+    tse_chain.h tse_chain.cpp
     autotest.h autotest.cpp
 )
 target_include_directories(pvad_demo PRIVATE

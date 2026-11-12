@@ -16,3 +16,10 @@ int run_persist_test(const std::string& root);
 
 // UI 状态机/背压决策无头验证（UiState 转移 + Backpressure 丢帧语义）
 int run_ui_state_test();
+
+// TSE 链路冒烟（--tse-smoke）：多尺度声纹注册 + e16 step 提取 + ASR 对照
+int run_tse_smoke(const std::string& root);
+
+// 听故事打断全链验证（--story-test）：PVAD 守门 → TSE 提取 → ASR，泄漏率对照断言
+int run_story_test(const std::string& root, const std::string& tts_model_dir,
+                   float story_gain = 0.45f, float mask_thr = 0.5f);
