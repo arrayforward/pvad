@@ -659,6 +659,7 @@ int run_tse_smoke(const std::string& root) {
     size_t n = std::min(wa.samples.size(), wb.samples.size());
     std::vector<float> mix(n);
     for (size_t i = 0; i < n; i++) mix[i] = wa.samples[i] + 0.6f * wb.samples[i];
+    std::filesystem::create_directories(root + "/qt_demo/recordings");
     write_wav16(root + "/qt_demo/recordings/_tmp_tse_smoke_mix.wav", mix, 16000);
 
     TseSpeakerEncoder enc(root + "/models/tse_e16/speaker_encoder.onnx");
@@ -687,14 +688,11 @@ int run_tse_smoke(const std::string& root) {
 
 // ---------------- 听故事全链验证（--story-test / --direct-asr-test） ----------------
 // TTS 合成中文故事（干扰, 0.45 增益模拟回声）+ voice1b(注册用户全量, 2s 处混入)。
-// story-test 等 INTERRUPT 切片；direct-asr-test 由 VAD 自动收集，不要求触发。
-// direct_v3 复核 → AGC → TSE → ASR（无 PVAD 帧掩码）；断言触发/收集、泄漏对照与目标召回。
+// story-test 由 VAD 自动收集（v7b 流式 PVAD 已从产品移除）；断言收集、泄漏对照与目标召回。
 // 指标标定依据见 USAGE.md 4.5 节（单麦模拟折损与无掩码泄漏如实记录）。
 
-#include "pvad_stream.h"
 #include "vad.h"
 #include "fbank.h"
-#include "gate.h"
 
 namespace {
 
@@ -746,8 +744,7 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
                    float story_gain, float mask_thr, bool direct_asr) {
     int fails = 0;
     std::string err;
-    printf("[story-test] === 听故事全链（%s → direct_v3 → TSE → ASR） ===\n",
-           direct_asr ? "VAD自动转写，无需打断" : "PVAD打断");
+    printf("[story-test] === 听故事全链（VAD 收集 → direct_v4 → TSE → ASR） ===\n");
 
     const std::string kStory =
         "孔融四岁的时候，和哥哥们一起吃梨，他总是拿最小的一个。大人问他为什么，他说我年纪小，"
@@ -795,55 +792,27 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
     printf("[story-test] mix %.2fs (story %.2fs gain%.2f + voice1b %.2fs@2s)\n",
            total / 16000.0, story.size() / 16000.0, (double)story_gain,
            wa.samples.size() / 16000.0);
+    std::filesystem::create_directories(root + "/qt_demo/recordings");
     write_wav16(root + "/qt_demo/recordings/_tmp_story_mix.wav", mix, 16000);
     // 与 GUI 默认一致：RNNoise 降噪后的流进 PVAD/TSE/ASR
     mix = pre_denoise(mix, nullptr);
 
-    // 3) 流式 PVAD 守门（与 Engine::tick 麦克风路径同一套状态机）
-    DemoCore core;
-    if (!core.init(root + "/models/campplus.onnx", root + "/models/pvad/pvad_v5.onnx", err)) {
-        printf("[story-test] core init failed: %s\n", err.c_str());
-        return 1;
-    }
-    if (!core.enroll({root + "/test_audio/voice1b.wav"}, err)) {
-        printf("[story-test] enroll failed: %s\n", err.c_str());
-        return 1;
-    }
-    PvadStream stream(root + "/models/pvad/pvad_v7b_stream.onnx");
-    stream.set_emb(core.centroid().data());
-    {
-        auto fm = core.fbank_mean();
-        if (!fm.empty()) stream.set_cmvn_prior(fm.data());
-    }
+    // 3) VAD 自动分段收集（v7b 流式 PVAD 已从产品移除：长流自适应失效 + 真人 B 90%
+    //    误触发；打断职责由 direct_v4 周期复核承担，其回归见 --confirm-test）。
+    //    两种入口（--story-test/--direct-asr-test）现为同一收集语义。
     Vad vad(root + "/models/silero_vad.onnx");
-    PvadGate gate{0.5f, 0.2f, 2};
-    Fbank fb;
-    std::deque<float> swin;
-    bool svad_sp = false;
-    int warmup = 20;
-    long trig = -1;   // 触发帧（mix 内帧号；direct_asr 模式不依赖它）
-    long coll_start = -1;  // VAD 自动或 INTERRUPT 回滚 0.5s 的收集起点
-    long coll_end = -1;  // 收集结束帧（不含）
+    long coll_start = -1;  // VAD 自动收集起点（含 0.5s 回滚）
+    long coll_end = -1;    // 收集结束帧（不含）
     int silence_run = 0;   // 连续非语音帧（收集结束判定的 hangover）
     size_t nframes = mix.size() / 160;
     for (size_t i = 0; i < nframes && coll_end < 0; i++) {
         const float* src = &mix[i * 160];
         float vp = vad.process(src, 160);
         bool sp = vp >= 0.f && vp > 0.5f;
-        if (vp >= 0.f && sp != svad_sp) {
-            if (svad_sp && !sp) {
-                stream.reset_gru();
-                gate.reset();
-                warmup = 20;
-            }
-            svad_sp = sp;
-        }
-        if (direct_asr && coll_start < 0 && sp) {
+        if (coll_start < 0 && sp) {
             coll_start = i >= 50 ? (long)i - 50 : 0;
             silence_run = 0;
-            printf("[story-test] direct-ASR VAD collect @ frame %ld（无需 INTERRUPT）\n", coll_start);
-        } else if (!direct_asr && trig >= 0 && coll_start < 0) {
-            coll_start = trig >= 50 ? trig - 50 : 0;
+            printf("[story-test] VAD collect @ frame %ld\n", coll_start);
         }
         // 收集结束判定：连续 0.4s 非语音或满 6s
         if (coll_start >= 0) {
@@ -854,36 +823,14 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
                 break;
             }
         }
-        for (int j = 0; j < 160; j++) swin.push_back(src[j]);
-        if (swin.size() < 480) continue;
-        float w[400], f80[80];
-        std::copy(swin.begin(), swin.begin() + 400, w);
-        fb.compute_one(w, f80);
-        swin.erase(swin.begin(), swin.begin() + 160);
-        auto o = stream.push_frame(f80);
-        if (!o.valid || !o.gated || !sp) continue;  // 与 Engine 一致：会话起始 0.5s 不门控
-        if (warmup > 0) { warmup--; continue; }
-        bool fire = gate.update(o.p);
-        if (fire && trig < 0) {
-            trig = (long)i;
-            printf("[story-test] INTERRUPT @ frame %ld (t=%.2fs, p=%.3f)\n", trig, i * 0.01, o.p);
-        }
     }
-    if (trig < 0 && !direct_asr) {
-        printf("STORY pvad-trigger: no interrupt on mix -> FAIL\n");
-        return 1;
-    }
-    if (trig >= 0)
-        printf("STORY pvad-trigger: frame=%ld t=%.2fs -> PASS\n", trig, trig * 0.01);
-    else
-        printf("[story-test] direct-ASR：没有 INTERRUPT 也继续转写\n");
     if (coll_start < 0) {
         printf("STORY collect-start: no speech collected -> FAIL\n");
         return 1;
     }
     if (coll_end < 0) coll_end = (long)std::min(nframes, (size_t)coll_start + 600);
 
-    // 4) 切片（VAD/触发帧-0.5s 起）→ direct_v3 复核 → TSE 提取
+    // 4) 切片（VAD/触发帧-0.5s 起）→ direct_v4 复核 → TSE 提取
     size_t from = (size_t)coll_start;
     std::vector<float> seg(mix.begin() + (ptrdiff_t)from * 160,
                            mix.begin() + (ptrdiff_t)coll_end * 160);
@@ -891,18 +838,18 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
            coll_end * 0.01);
 
     TseSpeakerEncoder enc(root + "/models/tse_e16/speaker_encoder.onnx");
-    // 与 Engine 一致：v7b 已触发后，direct_v3 TH=0.0 只复核 ASR 输入，不撤销打断。
-    DirectGate review(root + "/models/tse_e16/direct_v3.onnx", 0.0f, 0.3f);
+    // 与 Engine 一致：VAD 自动收集，direct_v4 官方点复核 ASR 输入。
+    DirectGate review(root + "/models/tse_e16/direct_v4.onnx", 0.23f, 0.2f);
     auto raw_ref = enc.encode({wa.samples}, false);
     raw_ref.resize(192);
     auto review_a = review.decide(enc.encode_windows(seg.data(), (int)seg.size()), raw_ref);
-    printf("[story-test] direct-v3 A identity=%.5f confidence=%.5f closed=%d\n",
+    printf("[story-test] direct-v4 A identity=%.5f confidence=%.5f closed=%d\n",
            review_a.identity, review_a.confidence, (int)review_a.closed);
     if (review_a.closed) {
-        printf("STORY direct-v3-review-open-A: closed -> FAIL\n");
+        printf("STORY direct-v4-review-open-A: closed -> FAIL\n");
         return 1;
     }
-    printf("STORY direct-v3-review-open-A: identity %.3f -> PASS\n", review_a.identity);
+    printf("STORY direct-v4-review-open-A: identity %.3f -> PASS\n", review_a.identity);
     auto temb = enc.encode({wa.samples});
     TseEngine tse(root + "/models/tse_e16/erb_df_step.onnx", temb);
     AgcReport agc;
@@ -941,21 +888,144 @@ int run_story_test(const std::string& root, const std::string& tts_model_dir,
         printf("STORY %-40s %s\n", name, cond ? "PASS" : "FAIL");
         if (!cond) fails++;
     };
-    if (direct_asr) {
-        check("direct-asr-collect-before-interrupt",
-              coll_start >= 0 && (trig < 0 || coll_start < trig));
-    } else {
-        // 触发须落在 voice1b 混入之后（防冷启动 blip 使测试形同虚设）
-        check("pvad-trigger-on-target (2s<t<6s)", trig >= 200 && trig <= 600);
-    }
-    if (direct_asr)
-        check("leak-ext<=0.30 (无掩码连续模式)", leak_ext <= 0.30);
-    else
-        check("leak-ext<=0.15 (无掩码打断切片)", leak_ext <= 0.15);
+    (void)direct_asr;  // 两种入口现为同一 VAD 收集语义（v7b 已移除）
+    check("vad-collect-started", coll_start >= 0);
+    check("leak-ext<=0.30 (无掩码连续模式)", leak_ext <= 0.30);
     check("leak-mix>leak-ext+0.1 (对照组明显泄漏)", leak_mix > leak_ext + 0.1);
     // SAPI 弱目标 + 单麦模拟 4ch 折损（USAGE 4.5 如实记录）：线放宽到 0.2
     check("target-recall>=0.2 (ASR 输出含注册用户内容)", tgt_recall >= 0.2);
 
     printf("[story-test] %s\n", fails == 0 ? "ALL PASS" : "HAS FAILURES");
+    return fails == 0 ? 0 : 1;
+}
+
+// ---------------- 打断快速复核验证（--confirm-test） ----------------
+// 与 Engine 麦克风路径一致：TTS 播放中每 1s 用 direct_v4(TH=0.35/UNC=0) 复核尾部 3s
+// 滑窗，放行才停。三场景：TTS 自回声不停 / 注册用户 barge-in 停 / 真人 B 不停。
+int run_confirm_test(const std::string& root, const std::string& tts_model_dir) {
+    printf("[confirm-test] === 打断复核（direct_v4 0.35/0 周期复核，播放中方停 TTS） ===\n");
+    int fails = 0;
+    std::string err;
+
+    // 真人 A/B（pvad-data test 池；A 一句注册、另一句 barge-in，B 为另一说话人。
+    // 不用 SAPI voice1b 当 A：它与故事 TTS 同语音家族，echo identity 虚高，是测试资产假象）
+    const std::string a_dir = "D:/ai-app/pvad-data/speakers/aishell/S0064/";
+    const std::string a_enroll = a_dir + "BAC009S0064W0121.wav";
+    const std::string a_barge = a_dir + "BAC009S0064W0123.wav";
+    const std::string b_path = "D:/ai-app/pvad-data/speakers/stcmds/P00327/20170001P00327I0046.wav";
+    bool have_real = fopen(a_enroll.c_str(), "rb") && fopen(a_barge.c_str(), "rb")
+                     && fopen(b_path.c_str(), "rb");
+    if (!have_real) {
+        printf("[confirm-test] 真人测试资产缺失（pvad-data test 池），SKIP\n");
+        return 0;
+    }
+    WavData wa = read_wav(a_barge);       // A 的 barge-in 句（7.8s）
+    WavData wa_enroll = read_wav(a_enroll);
+
+    TseSpeakerEncoder enc(root + "/models/tse_e16/speaker_encoder.onnx");
+    auto ref = enc.encode({wa_enroll.samples}, false);  // direct 复核引用：原始电平 deep-192
+    ref.resize(192);
+    DirectGate confirm(root + "/models/tse_e16/direct_v4.onnx", 0.35f, 0.0f);
+
+    // TTS 故事（缓存优先，与 story-test 同一资产）
+    std::vector<float> story;
+    std::string cache = root + "/test_audio/story_tts.wav";
+    try {
+        WavData cw = read_wav(cache);
+        story = std::move(cw.samples);
+    } catch (...) {
+        Tts tts;
+        if (!tts.init(tts_model_dir, err)) {
+            printf("[confirm-test] TTS init failed: %s\n", err.c_str());
+            return 1;
+        }
+        int nsr = 0;
+        if (!tts.speak16k("孔融四岁的时候，和哥哥们一起吃梨，他总是拿最小的一个。大人问他为什么，"
+                          "他说我年纪小，应该吃小的，大的留给哥哥们。大家听了，都夸他是个懂事的好孩子。",
+                          story, nsr, err)) {
+            printf("[confirm-test] TTS synth failed: %s\n", err.c_str());
+            return 1;
+        }
+        write_wav16(cache, story, 16000);
+    }
+    const double story_dur = story.size() / 16000.0;
+
+    // 场景执行：虚拟播放 story（t<story_dur 视为播放中），input 为麦克风收到的音频。
+    // 与 Engine 一致：播放中每 1s 用 direct_v4(0.35/0) 复核尾部 3s，放行才停。
+    // 返回 TTS 被停时刻（-1 = 未停）。
+    auto run_scene = [&](const std::vector<float>& input) {
+        double stop_t = -1;
+        std::deque<float> cbuf;
+        size_t nframes = input.size() / 160;
+        for (size_t i = 0; i < nframes && stop_t < 0; i++) {
+            const float* src = &input[i * 160];
+            for (int j = 0; j < 160; j++) cbuf.push_back(src[j]);
+            while (cbuf.size() > 16000 * 4) cbuf.pop_front();
+            if ((i + 1) % 100 != 0) continue;  // 每 1s 复核一次
+            double t = (i + 1) * 0.01;
+            if (t >= story_dur) break;  // 故事已播完，不存在“停”
+            std::vector<float> seg(48000, 0.f);
+            size_t take = cbuf.size() < 48000 ? cbuf.size() : 48000;
+            std::copy(cbuf.end() - (ptrdiff_t)take, cbuf.end(), seg.end() - (ptrdiff_t)take);
+            auto d = confirm.decide(enc.encode_windows(seg.data(), (int)seg.size()), ref);
+            printf("[confirm-test]   review @%.2fs identity=%.3f conf=%.3f -> %s\n",
+                   t, d.identity, d.confidence, d.closed ? "closed" : "OPEN");
+            if (!d.closed) stop_t = t;
+        }
+        return stop_t;
+    };
+
+    // 电平按部署校准：guest（A 或 B）归一到近场 active RMS target_level；
+    // 故事回声 0.45×story ≈ 0.036，A 0.045（略大于回声），B 0.0142（低 A 约 10dB）。
+    auto active_rms_of = [](const std::vector<float>& x) {
+        double sum = 0.0;
+        size_t n = 0;
+        for (size_t i = 0; i + 160 <= x.size(); i += 160) {
+            double e = 0.0;
+            for (int j = 0; j < 160; j++) e += (double)x[i + j] * x[i + j];
+            e = std::sqrt(e / 160.0);
+            if (e > 0.003) { sum += e * e; n++; }
+        }
+        return n ? std::sqrt(sum / n) : 0.0;
+    };
+    auto mix_with_story = [&](const std::vector<float>& guest, size_t guest_off,
+                              double target_level) {
+        double g = target_level / std::max(active_rms_of(guest), 1e-6);
+        size_t total = std::max(story.size(), guest_off + guest.size());
+        std::vector<float> mix(total, 0.f);
+        for (size_t i = 0; i < story.size(); i++) mix[i] += 0.225f * story[i];  // 回声 0.018，低于 A 约 8dB（部署 5~15dB 区间中位）
+        for (size_t i = 0; i < guest.size(); i++) mix[guest_off + i] += (float)(guest[i] * g);
+        return pre_denoise(mix, nullptr);
+    };
+
+    // S1: 纯 TTS 自回声 -> TTS 不得被停
+    {
+        std::vector<float> echo(story.size());
+        for (size_t i = 0; i < story.size(); i++) echo[i] = story[i] * 0.225f;
+        double stop_t = run_scene(pre_denoise(echo, nullptr));
+        bool pass = stop_t < 0;
+        printf("CONFIRM S1 tts-self-echo: stop_t=%.2f -> %s\n",
+               stop_t, pass ? "PASS" : "FAIL");
+        if (!pass) fails++;
+    }
+    // S2: 注册用户（真人 A）在 2s 处 barge-in -> 须停且落在 [2.0, 6.0]s
+    {
+        double stop_t = run_scene(mix_with_story(wa.samples, 16000 * 2, 0.045));
+        bool pass = stop_t >= 2.0 && stop_t <= 6.0;
+        printf("CONFIRM S2 user-bargein: stop_t=%.2f (A@2s, story %.1fs) -> %s\n",
+               stop_t, story_dur, pass ? "PASS" : "FAIL");
+        if (!pass) fails++;
+    }
+    // 真人 B 在 2s 处说话（TTS 播放中，低 A 约 10dB） -> 须不停
+    {
+        WavData wb = read_wav(b_path);
+        double stop_t = run_scene(mix_with_story(wb.samples, 16000 * 2, 0.0142));
+        bool pass = stop_t < 0;
+        printf("CONFIRM S3 real-human-B: stop_t=%.2f -> %s\n",
+               stop_t, pass ? "PASS" : "FAIL");
+        if (!pass) fails++;
+    }
+
+    printf("[confirm-test] %s\n", fails == 0 ? "ALL PASS" : "HAS FAILURES");
     return fails == 0 ? 0 : 1;
 }

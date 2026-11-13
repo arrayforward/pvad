@@ -23,16 +23,24 @@ TTS 时**只有已注册用户 A 的语音可以打断播放**——TTS 自身�
   pvad_demo（Qt6 图形 demo：引导式三段注册向导、TTS 朗读、麦克风/WAV 注入监听、
   `--auto-test`/`--wizard-test`/`--record-test`/`--probe-audio` 无头验证）
 - **连续转写与听故事演示（qt_demo）**：VAD 检测到语音即自动分段，**无需 INTERRUPT**；
-  PVAD v7b 只独立控制 TTS 打断（界面阈值 0.05~0.95 实时可调）。每段先由
-  **direct_v3 TH=0.0** 高召回复核（不确定区放行），再由 e16 TSE（单麦模拟 4ch）提取
+  TTS 打断由 **direct_v4 周期复核**承担（播放中每 1s 复核尾部 3s 滑窗，identity ≥ 阈值
+  才停；阈值 0.05~0.95 界面实时可调，默认 **0.35**；v7b 流式 PVAD 已于 2026-11-13
+  移除——长流自适应后触发不及时且真人 B 误触发 90%，见
+  [docs/REGRESSION.md](docs/REGRESSION.md) barge-in 对照）。每段先由
+  **direct_v4 TH=0.23/UNC=0.2（官方点）**复核，再由 e16 TSE（单麦模拟 4ch）提取
   注册用户声音，sherpa-onnx Paraformer-zh ASR 出字。**ASR 直接识别 TSE 输出，不再使用
   PVAD 帧掩码**；空识别不会清空上一句有效结果。无头回归 `--story-test` /
-  `--direct-asr-test`（见 [docs/USAGE.md](docs/USAGE.md) 4.5 节）
+  `--direct-asr-test` / `--confirm-test`（见 [docs/USAGE.md](docs/USAGE.md) 4.5 节）
 - **TSE 输入电平校准**：麦克风每秒记录 RMS/有效语音 RMS/峰值；注册与提取切片以
   **恒定增益**校准有效语音 RMS 到 **0.045（−26.9dBFS）**，限增益 0.1~12、峰值 0.95，
   不做会损伤 GRU 状态的动态逐帧 AGC，也不改变 PVAD 门控输入。`--agc-test` 可无头验证
 
 ## 系统效果（test 池 89 人，与训练/验证零重叠；漏打断 / 误打断 / **正确率**）
+
+> 注意（2026-11-13）：本节 v3/v4/v5/v7b 表格基于旧混合集（SNR -5~10、±6dB 电平扰动），
+> 该集合已判定为训练难点集而非部署验收集并作废（test 分裂已删）。当前有效验收口径为
+> 真人测试集（A 大 B 小 5~15dB），见 [docs/REGRESSION.md](docs/REGRESSION.md) 首节；
+> 下表仅作模型间相对排序的历史存档。
 
 python 评估口径（500 条含双讲样本/条件）：
 
@@ -63,7 +71,7 @@ v4 帧级（干净/增广）：recall 0.940/0.926，FAR 0.210/0.446。
 | 场景 | 模型 | 说明（python 口径 干净/增广） |
 |---|---|---|
 | 离线 / 批量回归 | `pvad_v5.onnx` | 多帧 tokens+交叉注意力，93.0% / 89.4%（增广历代最佳） |
-| 实时（**默认**） | `pvad_v7b_stream.onnx` | 长短混合微调：96.5% / 79.5%，**长流吸收态免疫**（召回 75.3%）、冷启动 maxP 0.014；会话策略 confirm=2 |
+| 实时（CLI 默认） | `pvad_v7b_stream.onnx` | 长短混合微调：96.5% / 79.5%，**长流吸收态免疫**（召回 75.3%）、冷启动 maxP 0.014；会话策略 confirm=2。**qt_demo 已不用它**（2026-11-13 起打断由 direct_v4 复核承担，打包不再包含） |
 | 实时备选：持续强噪 / 混响 | `pvad_v4_stream.onnx` | EMA-CMVN 微调，94.5% / 82.5%（增广鲁棒性最好；无吸收态免疫需会话策略） |
 | 实时干净场景（存档） | `pvad_v5s_stream.onnx` | cos 注意力+EMA 微调，92.0% / 85.0%（增广差 2pp 未过线） |
 

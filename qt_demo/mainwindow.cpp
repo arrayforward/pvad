@@ -124,9 +124,9 @@ MainWindow::MainWindow() {
     threshold_spin_->setRange(0.05, 0.95);
     threshold_spin_->setDecimals(2);
     threshold_spin_->setSingleStep(0.05);
-    threshold_spin_->setValue(0.50);
+    threshold_spin_->setValue(0.35);
     threshold_spin_->setPrefix("阈值 ");
-    threshold_spin_->setToolTip("P(target) 连续 2 帧超过该阈值才打断；实时修改立即复位门控计数");
+    threshold_spin_->setToolTip("direct_v4 identity ≥ 阈值才停 TTS（1s 滑窗复核，实时生效）");
     h4->addWidget(prob_bar_, 1);
     h4->addWidget(prob_label_);
     h4->addWidget(gate_label_);
@@ -134,7 +134,7 @@ MainWindow::MainWindow() {
     vbox->addWidget(g_state);
 
     // 连续转写区（VAD 自动分段，无需打断；TSE 提取注册用户声音 → ASR）
-    auto* g_asr = new QGroupBox("连续转写（无需打断，direct_v3+TSE+ASR）", this);
+    auto* g_asr = new QGroupBox("连续转写（无需打断，direct_v4+TSE+ASR）", this);
     auto* h5 = new QHBoxLayout(g_asr);
     asr_box_ = new QCheckBox("仅保留注册用户声音", g_asr);
     asr_edit_ = new QLineEdit(g_asr);
@@ -234,7 +234,8 @@ MainWindow::MainWindow() {
     connect(engine_, &Engine::probUpdate, this, [this](float p, int consec) {
         prob_bar_->setValue(int(p * 100));
         prob_label_->setText(QString("P(target)=%1").arg(p, 0, 'f', 3));
-        if (!interrupt_ui_latched_) gate_label_->setText(QString("consec=%1").arg(consec));
+        if (!interrupt_ui_latched_)
+            gate_label_->setText(QString("TH=%1").arg(threshold_spin_->value(), 0, 'f', 2));
     });
     connect(engine_, &Engine::interruptFired, this, [this](double t) {
         interrupt_ui_latched_ = true;

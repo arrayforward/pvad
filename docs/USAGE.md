@@ -246,15 +246,17 @@ windeployqt 自动拷贝；sherpa/onnxruntime DLL 一并拷贝（onnxruntime.dll
 - `--agc-test`：电平计与 TSE 恒定增益校准验证（有效 RMS=0.045、静音、低电平门限、
   峰值保护、任意分块一致性，ALL PASS）
 - `--story-test`：听故事打断全链无头验证（见 4.5）
-- `--direct-asr-test`：同一混合剧本走 VAD 自动转写，断言收集早于 INTERRUPT，验证无需打断
-  也能完成 direct_v3 → TSE → ASR（见 4.5）
+- `--direct-asr-test`：与 `--story-test` 同一 VAD 自动收集语义（v7b 移除后两入口等价）
+- `--confirm-test`：打断复核回归（真人 A/B + TTS 自回声三场景，见 4.5）
 
-### 4.5 听故事打断演示（PVAD 守门 → TSE 提取 → ASR 出字）
+### 4.5 听故事打断演示（VAD 收集 → direct_v4 复核 → TSE 提取 → ASR 出字）
 
 GUI 完整链路：**麦克风 → RNNoise → VAD 检测语音并自动分段（无需 INTERRUPT）→
-direct_v3 高召回复核 → 电平校准 → TSE 提取注册用户声音 → sherpa-onnx Paraformer-zh ASR →
-文本上屏**。PVAD v7b_stream 独立判断是否停止 TTS；门控状态区的阈值输入框支持
-0.05~0.95（默认 0.50、步进 0.05）实时调整，修改后立即复位计数，麦克风与 WAV 注入均生效。
+direct_v4 官方点（TH=0.23/UNC=0.2）复核 → 电平校准 → TSE 提取注册用户声音 →
+sherpa-onnx Paraformer-zh ASR → 文本上屏**。TTS 打断由 **direct_v4 周期复核**承担：
+播放中每 1s 复核尾部 3s 滑窗，identity ≥ 阈值才停（带 VAD 静音保护）；门控状态区的
+阈值输入框 0.05~0.95（默认 **0.35**、步进 0.05）实时调整。v7b 流式 PVAD 已移除
+（长流自适应失效 + 真人 B 90% 误触发，见 REGRESSION barge-in 对照）。
 
 - **电平计量与校准**：监听日志每 1s 显示 RMS/有效语音 RMS/峰值；PVAD 输入保持原样。
   TSE 注册和提取切片统一以恒定增益校准到有效语音 RMS=0.045，增益 0.1~12、峰值 0.95，
@@ -262,8 +264,8 @@ direct_v3 高召回复核 → 电平校准 → TSE 提取注册用户声音 → 
 - **TTS 区故事下拉**：内置 4 个中文民间故事（龟兔赛跑/愚公移山/孔融让梨/狼来了），
   选中即填入朗读文本框，点 `朗读` 播放
 - **连续转写区**：勾选 `仅保留注册用户声音` 后，VAD 检测到语音即开始收集（回滚 0.5s，
-  VAD 静音或 6s 封顶），无需等待 PVAD 打断。TSE 提取后 ASR 出字显示在「连续转写」区；
-  PVAD 仅独立负责停止 TTS。**TTS 朗读文本不会主动进入该区域**（该区域只接 ASR 输出）
+  VAD 静音或 6s 封顶）。TSE 提取后 ASR 出字显示在「连续转写」区；停止 TTS 由
+  direct_v4 打断复核独立负责。**TTS 朗读文本不会主动进入该区域**（该区域只接 ASR 输出）
 - **单麦模拟折损**：e16 TSE 模型按 4 通道输入训练，demo 将单声道复制到 4 通道
   （各通道相同，无空间信息），分离效果较官方多麦数据有折损。**当前不做 PVAD 帧掩码**，
   ASR 直接识别 TSE 输出，避免门控低于 0.5 时目标语音被整段清零。代价是连续模式下
@@ -277,44 +279,46 @@ direct_v3 高召回复核 → 电平校准 → TSE 提取注册用户声音 → 
   mv third_party/models/sherpa-onnx-paraformer-zh-int8-2025-10-07 third_party/models/paraformer-zh-int8
   ```
   可用 `ASR_MODEL_DIR` 环境变量覆盖路径。TSE 两个模型
-  （`models/tse_e16/erb_df_step.onnx` 40.9MB + `speaker_encoder.onnx` 5.2MB）及二级复核
-  `direct_v3.onnx`（FP32，含同名 `.data` 外部权重）随仓库提交。
-- **direct_v3 二级复核**：VAD 分段后按 3s 窗/1s hop 计算原始电平 deep-192，使用
-  `TH=0.0/UNC=0.3` 高召回工作点；关闭只丢弃本段 TSE/ASR，**不影响 PVAD 打断状态**，
-  不确定、模型加载失败或推理异常都放行。日志显示 identity/confidence 与放行结果。
+  （`models/tse_e16/erb_df_step.onnx` 40.9MB + `speaker_encoder.onnx` 5.2MB）及复核
+  `direct_v4.onnx`（FP32，含同名 `.data` 外部权重）随仓库提交。
+- **direct_v4 复核（两级）**：①转写复核：VAD 分段后按 3s 窗/1s hop 计算原始电平
+  deep-192，官方点 `TH=0.23/UNC=0.2`；关闭只丢弃本段 TSE/ASR，不确定、模型加载失败或
+  推理异常都放行。②打断复核：TTS 播放中每 1s 复核尾部 3s 滑窗（默认 `TH=0.35/UNC=0`，
+  界面阈值框实时可调），identity ≥ 阈值且最近 0.5s 有语音才停 TTS。日志显示
+  identity/confidence 与放行结果。
 - **注册联动**：每段注册除 CAM++ 192 维 embedding 外，顺带算 TSE 4288 维多尺度声纹
   存入 `segments.json` 的 `tse_emb` 字段，新校准版本带 `tse_emb_agc:true`。旧格式或缺少
   该标记的段加载时从来源 wav 重算；wav 已删则保留旧嵌入并降级警告。4288 维向量不做
   二次 L2 归一化
-- **会话冷启动保护**：会话起始 0.5s 内 PvadStream 的分数不入门控（`o.gated`），
-  压掉 EMA/GRU 暂态造成的冷启动 blip（story-test 复现：故事开播 0.40s 处
-  P 短暂冲到 0.59 的假触发）
 
-无头验证使用同一缓存混合剧本：`--story-test` 等待 INTERRUPT 后切片；`--direct-asr-test`
-由 VAD 自动收集，验证不触发 INTERRUPT 也能转写。两者都经过 direct_v3、AGC、TSE、ASR，
+无头验证使用同一缓存混合剧本：`--story-test` 与 `--direct-asr-test` 现为同一 VAD
+自动收集语义（v7b 流式 PVAD 已移除，不再有 INTERRUPT 切片）；`--confirm-test` 验证
+打断复核三场景（TTS 自回声不停 / 真人 A barge-in 停 / 真人 B 不停，真人语料取自
+pvad-data test 池，缺失则 SKIP）。story 两入口都经过 direct_v4、AGC、TSE、ASR，
 **不再经过 PVAD 帧掩码**（旧 `--mask-thr` 参数仅为命令行兼容保留，不生效）。断言包括：
-目标段/自动收集有效、提取组泄漏低于直接混合对照、目标召回 ≥0.2；连续模式额外要求
-收集早于 INTERRUPT，泄漏 ≤0.30，打断切片泄漏 ≤0.15。
+VAD 自动收集有效、提取组泄漏低于直接混合对照、目标召回 ≥0.2、泄漏 ≤0.30。
 
-**如实记录（2026-11-12 当前无掩码版本，huayan 故事 + SAPI voice1b）**：
+**如实记录（2026-11-13，VAD 收集版，huayan 故事 + SAPI voice1b）**：
 
-| 模式 | 切片 | 触发/收集 | leak(ext) | leak(mix) | 目标召回 |
+| 模式 | 切片 | 收集 | leak(ext) | leak(mix) | 目标召回 |
 |---|---|---|---:|---:|---:|
-| `--story-test` | 1.95~7.95s | 2.45s 触发 | **0.031** | 0.359 | **0.571** |
-| `--direct-asr-test` | 0~6s | frame 0 自动收集，早于 frame 245 | **0.281** | 0.406 | **0.321** |
+| `--story-test` / `--direct-asr-test` | 0~6s | frame 0 VAD 自动收集 | **0.281** | 0.406 | **0.321** |
 
-两种模式 ALL PASS。去掩码后目标召回提高，但连续模式包含故事前缀，TTS 泄漏明显，
-不能再理解为“TTS 文本绝不进 ASR”。中间产物写到
-`qt_demo/recordings/_tmp_story_{mix,seg,ext}.wav` 便于人工试听核对。
+ALL PASS。连续模式包含故事前缀，TTS 泄漏明显，不能理解为“TTS 文本绝不进 ASR”。
+中间产物写到 `qt_demo/recordings/_tmp_story_{mix,seg,ext}.wav` 便于人工试听核对。
+（2026-11-12 之前的打断切片版 leak 0.031 / recall 0.571 基于已移除的 v7b 触发，
+仅作历史存档。）
 
 ### 4.4 模型版本切换
 
 - CLI 离线：`--pvad-model models/pvad/pvad_v5.onnx`（**默认已是 v5**；v1-v4 单向量接口与
   v5 tokens 接口自动检测适配，模板用 v4 格式含 tokens）
-- CLI 实时 / qt_demo 麦克风：`pvad_v7b_stream.onnx`（**2026-09-08 起实时默认**——v7b
+- CLI 实时：`pvad_v7b_stream.onnx`（**2026-09-08 起 CLI 实时默认**——v7b
   吸收态免疫+干净 96.5%+冷启动 maxP 0.014，增广 −3pp 为已知代价；持续强噪/混响环境
   退回备选 `pvad_v4_stream.onnx`。**不要用 pvad_v5_stream.onnx**——
   v5 流式版增广条件 −17pp 不达标，见 models/pvad/pvad_v5_stream.md 的如实记录；
+  **qt_demo 自 2026-11-13 不再使用流式 PVAD**：打断与 P(target) 显示由 direct_v4
+  周期复核承担，发布包不再包含 pvad_v7b_stream.onnx）；
   这就是"离线 v5 / 实时 v7b_stream"双模型部署的原因）
 - qt_demo 离线：默认编译期写死 `models/pvad/pvad_v5.onnx`（`engine.cpp` 的 `init()`）
 - **离线默认 v5 的理由**：增广 89.4%/误打断 10.0% 历代最佳（v4 为 83.0%/16.4%），

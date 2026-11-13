@@ -71,7 +71,7 @@ std::vector<std::vector<float>> TseSpeakerEncoder::encode_windows(const float* p
         std::vector<float> seg(W, 0.f);
         int count = std::min(W, std::max(0, n - s));
         if (count > 0) std::copy(pcm + s, pcm + s + count, seg.begin());
-        auto e = encode_one(seg.data(), W, false);  // direct_v3 对照路径：原始电平
+        auto e = encode_one(seg.data(), W, false);  // direct_v4 对照路径：原始电平
         e.resize(192);
         out.push_back(std::move(e));
     }

@@ -16,10 +16,10 @@ public:
     TseSpeakerEncoder& operator=(const TseSpeakerEncoder&) = delete;
     static constexpr int EMB_DIM = 4288;
     // 多段 16k 单声道 -> 逐段提取后均值（与 Kotlin encode() 一致）。
-    // apply_agc=false 供 direct_v3 二级复核复现其原始训练输入；TSE 默认 true。
+    // apply_agc=false 供 direct_v4 二级复核复现其原始训练输入；TSE 默认 true。
     std::vector<float> encode(const std::vector<std::vector<float>>& segments,
                               bool apply_agc = true);
-    // direct_v3：3s 窗 / 1s hop，短句零Padding到3s；返回每窗 deep-192（不做音频 AGC）。
+    // direct_v4：3s 窗 / 1s hop，短句零Padding到3s；返回每窗 deep-192（不做音频 AGC）。
     std::vector<std::vector<float>> encode_windows(const float* pcm, int n);
 private:
     std::vector<float> encode_one(const float* pcm, int n, bool apply_agc);

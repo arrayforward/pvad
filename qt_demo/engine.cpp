@@ -86,15 +86,13 @@ void Engine::init() {
             emit logLine("注册文件损坏，已降级为空注册: " + QString::fromStdString(le));
         }
     }
-    // 实时流式 PVAD（chunked GRU state 复用）
+    // silero VAD（连续转写收集判定）；打断与 P(target) 显示由 direct_v4 周期复核承担
     try {
-        stream_ = std::make_unique<PvadStream>(
-            (root + "/models/pvad/pvad_v7b_stream.onnx").toStdString());
         vad_ = std::make_unique<Vad>((root + "/models/silero_vad.onnx").toStdString());
-        refreshStreamEnroll();
-        emit logLine("流式 PVAD 已加载 (pvad_v7b_stream + silero VAD)");
+        emit logLine("VAD 已加载 (silero)");
     } catch (const std::exception& e) {
-        emit logLine("流式 PVAD 加载失败（麦克风监听不可用）: " + QString::fromStdString(e.what()));
+        vad_.reset();
+        emit logLine("VAD 加载失败（连续转写不可用）: " + QString::fromStdString(e.what()));
     }
     // 打断后 TSE+ASR 链（听故事打断演示）：加载失败仅降级，不影响监听主功能
     try {
@@ -108,11 +106,19 @@ void Engine::init() {
     }
     try {
         direct_gate_ = std::make_unique<DirectGate>(
-            (root + "/models/tse_e16/direct_v3.onnx").toStdString(), 0.0f, 0.3f);
-        emit logLine("句级二级复核已加载（direct_v3 TH=0.0，不确定区放行）");
+            (root + "/models/tse_e16/direct_v4.onnx").toStdString(), 0.23f, 0.2f);
+        emit logLine("句级二级复核已加载（direct_v4 官方工作点 TH=0.23 UNC=0.2）");
     } catch (const std::exception& e) {
         direct_gate_.reset();
         emit logLine("二级复核加载失败（仅跳过复核，不影响连续转写）: " + QString::fromStdString(e.what()));
+    }
+    try {
+        confirm_gate_ = std::make_unique<DirectGate>(
+            (root + "/models/tse_e16/direct_v4.onnx").toStdString(), 0.35f, 0.0f);
+        emit logLine("打断复核已加载（direct_v4 TH=0.35 UNC=0，TTS 播放中每 1s 复核，确认注册用户才停）");
+    } catch (const std::exception& e) {
+        confirm_gate_.reset();
+        emit logLine("打断复核加载失败，回退为 v7b 触发即停: " + QString::fromStdString(e.what()));
     }
     {
         asr_ = std::make_unique<Asr>();
@@ -160,19 +166,8 @@ void Engine::persistEnrollment() {
     if (EnrollStore::save(enrollmentDir().toStdString(), core_.segments(), core_.centroid(),
                           core_.fbank_mean(), e)) {
         emit logLine(QString("注册已落盘（%1 段 -> enrollment/）").arg(core_.enroll_count()));
-        refreshStreamEnroll();
     } else {
         emit logLine("注册保存失败: " + QString::fromStdString(e));
-    }
-}
-
-// 注册状态变化后同步流式 PVAD 的 emb 与 CMVN 先验
-void Engine::refreshStreamEnroll() {
-    if (!stream_) return;
-    if (core_.enrolled()) {
-        stream_->set_emb(core_.centroid().data());
-        auto m = core_.fbank_mean();
-        if (!m.empty()) stream_->set_cmvn_prior(m.data());
     }
 }
 
@@ -242,7 +237,7 @@ bool Engine::ensureDirectRef() {
         fclose(probe);
         try {
             WavData wd = read_wav(path);
-            auto e = tse_enc_->encode({wd.samples}, false);  // direct_v3 对照：原始电平
+            auto e = tse_enc_->encode({wd.samples}, false);  // direct_v4 对照：原始电平
             for (int i = 0; i < 192; i++) direct_ref_[i] += e[i];
             count++;
         } catch (...) {
@@ -287,8 +282,8 @@ void Engine::finalizeCollect() {
         emit logLine(QString("转写片段太短（%1s），跳过转写").arg(sec, 0, 'f', 2));
         return;
     }
-    // v7b 已负责快速打断；direct_v3 只复核是否把本段送入 TSE/ASR，绝不撤销用户打断。
-    // TH=0.0 是高召回工作点，置信度不足时默认放行，优先避免误杀用户。
+    // v7b 已负责快速打断；direct_v4 只复核是否把本段送入 TSE/ASR，绝不撤销用户打断。
+    // 官方工作点 TH=0.23/UNC=0.2（真人 held-out：TSE 后 A 放行 92.9%，B 关闭 66.7%）。
     if (direct_gate_ && ensureDirectRef()) {
         try {
             auto windows = tse_enc_->encode_windows(seg.data(), (int)seg.size());
@@ -368,10 +363,9 @@ void Engine::speakText(QString text) {
         std::lock_guard<std::mutex> lk(mu_);
         playbuf_ = std::move(pcm);
     }
-    // 新一次播放允许再次打断；否则 PvGate 上次 triggered 必须等 P<0.3 才复位，
-    // 用户重播后会看到门控仍在动却不再触发。
-    sgate_.reset();
+    // 新一次播放允许再次打断：复位上次触发锁存，打断复核从头调度
     interrupt_latched_ = false;
+    confirm_next_check_ = 0;
     playpos_.store(0);
     if (openPlayback(16000)) {
         playing_.store(true);
@@ -418,18 +412,14 @@ bool Engine::openCapture() {
 void Engine::startListenMic() {
     if (recording_ || wizard_.active()) { emit logLine("录音/向导中，请先完成或停止"); return; }
     if (!core_.enrolled()) { emit logLine("请先注册 A"); return; }
-    if (!stream_) { emit logLine("流式 PVAD 未加载，无法监听"); return; }
+    if (!vad_) { emit logLine("VAD 未加载，无法监听"); return; }
     inject_mode_ = false;
     if (!openCapture()) return;
-    core_.reset_stream();
-    stream_->reset();
     vad_->reset();
-    sgate_.reset();
-    swin_.clear();
-    svad_speech_ = false;
-    warmup_left_ = 20;
-    refreshStreamEnroll();
     interrupt_latched_ = false;
+    confirm_buf_.clear();
+    confirm_frame_ = 0;
+    confirm_next_check_ = 0;
     hist_.clear();
     hist_base_frame_ = 0;
     mic_frame_ = 0;
@@ -575,9 +565,9 @@ void Engine::clearEnroll() {
 
 void Engine::setPvadThreshold(double threshold) {
     float thr = (float)threshold;
-    core_.set_gate_threshold(thr);
-    sgate_ = PvadGate{thr, 0.2f, 2};
-    emit logLine(QString("PVAD 门控阈值已实时更新为 %1（连续 2 帧，计数已复位）")
+    core_.set_gate_threshold(thr);  // WAV 注入路径（DemoCore 离线门控）仍用
+    if (confirm_gate_) confirm_gate_->setThreshold(thr);
+    emit logLine(QString("打断复核阈值已实时更新为 %1（direct_v4 identity ≥ 阈值才停 TTS）")
                  .arg(thr, 0, 'f', 2));
 }
 
@@ -708,19 +698,19 @@ void Engine::tick() {
                 hist_base_frame_++;
             }
         }
-        // 长流会话策略（与 CLI StreamRunner 一致）：
-        // 1) silero VAD 判语音的帧才入门控；2) VAD speech-end 会话分段复位
-        // （只清 GRU state，保留 EMA/先验）；3) 复位后 warm-up 20 VAD 帧，confirm=4
+        // 打断复核缓冲：最近 4s post-denoise 音频（无论是否转写都维护，供 v4 复核滑窗）
+        for (int i = 0; i < 160; i++) confirm_buf_.push_back(src[i]);
+        confirm_frame_++;
+        while (confirm_buf_.size() > 16000 * 4) confirm_buf_.pop_front();
+        // direct_v4 周期复核（1s 滑窗）：identity 驱动 P(target) 表；播放中放行才停 TTS
+        if (confirm_gate_ && confirm_frame_ >= confirm_next_check_) {
+            confirm_next_check_ = confirm_frame_ + 100;
+            runConfirmCheck();
+        }
+        // silero VAD：连续转写的收集/结束判定，并记录最近语音帧（打断复核的静音保护）
         float vp = vad_->process(src, 160);
         bool sp = vp >= 0.f && vp > 0.5f;
-        if (vp >= 0.f && sp != svad_speech_) {
-            if (svad_speech_ && !sp) {
-                stream_->reset_gru();
-                sgate_.reset();
-                warmup_left_ = 20;
-            }
-            svad_speech_ = sp;
-        }
+        if (sp) last_speech_frame_ = confirm_frame_;
         // 连续转写：VAD 检测到语音即开始收集，不等待 INTERRUPT。
         // PVAD 打断只负责停止 TTS，与本转写状态机相互独立。
         if (asr_enabled_ && !collecting_ && sp && tse_enc_ && asr_ && !tse_emb_.empty()) {
@@ -740,25 +730,7 @@ void Engine::tick() {
                 else { collecting_ = false; emit logLine("转写片段太短，取消转写"); }
             }
         }
-        // 流式 PVAD：单帧 fbank（对齐 480 窗）+ chunk GRU 增量推理，每帧 O(1)
-        for (int i = 0; i < 160; i++) swin_.push_back(src[i]);
-        if (swin_.size() < 480) continue;
-        float w[400], f80[80];
-        std::copy(swin_.begin(), swin_.begin() + 400, w);
-        sfbank_.compute_one(w, f80);
-        swin_.erase(swin_.begin(), swin_.begin() + 160);
-        auto o = stream_->push_frame(f80);
-        // !o.gated = 会话起始 0.5s warm-up（PvadStream 自带）：压会话冷启动 blip
-        // （EMA/GRU 暂态会让首个语音段前 ~0.4s 的 P 虚高过阈，story-test 复现）
-        if (!o.valid || !o.gated || !sp) continue;
-        if (warmup_left_ > 0) { warmup_left_--; continue; }
-        bool fire = sgate_.update(o.p);
-        FrameEvent ev;
-        ev.p = o.p;
-        ev.consec = sgate_.consec();
-        ev.interrupt = fire;
-        ev.t = o.frame * 0.01;
-        handleEvent(ev);
+        // v7b 流式 PVAD 已移除：打断由上面的 direct_v4 周期复核承担
     }
     // 处理率看门狗：监听中每 10s 报一次实际处理帧率（采集标称 100 帧/s）
     if (listening_ && stats_window_frames_ > 0) {
@@ -779,20 +751,38 @@ void Engine::tick() {
 }
 
 void Engine::handleEvent(const FrameEvent& ev) {
+    // 仅 WAV 注入模式使用（DemoCore 离线门控）；麦克风路径的打断由 runConfirmCheck 承担
     emit probUpdate(ev.p, ev.consec);
     if (ev.interrupt) {
         emit interruptFired(ev.t);
         emit logLine(QString(">>> INTERRUPT @ %1s (P=%2)").arg(ev.t, 0, 'f', 2).arg(ev.p, 0, 'f', 3));
         if (playing_.load()) stopPlayback();
-        // 兜底：正常已由 VAD 自动收集；若尚未开始，则在触发帧-0.5s 补启动（注入模式跳过）
-        if (asr_enabled_ && !collecting_ && !inject_mode_ &&
-            tse_enc_ && asr_ && !tse_emb_.empty()) {
-            collecting_ = true;
-            silence_run_ = 0;
-            interrupt_frame_ = mic_frame_;
-            collect_from_ = mic_frame_ >= 50 ? mic_frame_ - 50 : hist_base_frame_;
-            if (collect_from_ < hist_base_frame_) collect_from_ = hist_base_frame_;
-            emit logLine("连续转写：开始收集语音（VAD 静音或 6s 截止）");
-        }
     }
+}
+
+// 打断复核：对 confirm_buf_ 尾部 3s（不足左补零，与 direct 训练/评估口径一致）
+// 跑 direct_v4（默认 TH=0.35/UNC=0，阈值界面实时可调）。identity 同时驱动 P(target) 表；
+// 仅在播放中且最近 0.5s 内有语音（VAD 静音保护）时，放行才停 TTS。
+void Engine::runConfirmCheck() {
+    std::vector<float> seg(48000, 0.f);
+    size_t take = confirm_buf_.size() < 48000 ? confirm_buf_.size() : 48000;
+    std::copy(confirm_buf_.end() - (ptrdiff_t)take, confirm_buf_.end(),
+              seg.end() - (ptrdiff_t)take);
+    if (!tse_enc_ || !ensureDirectRef()) return;
+    DirectGateDecision d;
+    try {
+        auto windows = tse_enc_->encode_windows(seg.data(), (int)seg.size());
+        d = confirm_gate_->decide(windows, direct_ref_);
+    } catch (const std::exception& e) {
+        emit logLine("打断复核异常（忽略本次）: " + QString::fromStdString(e.what()));
+        return;
+    }
+    float p = d.identity < 0.f ? 0.f : (d.identity > 1.f ? 1.f : d.identity);
+    emit probUpdate(p, 0);
+    if (!playing_.load() || d.closed) return;
+    if (confirm_frame_ - last_speech_frame_ > 50) return;  // 静音保护：最近 0.5s 无语音不停
+    emit interruptFired(confirm_frame_ * 0.01);
+    emit logLine(QString("打断复核放行（identity=%1 ≥ %2），停止 TTS")
+                 .arg(d.identity, 0, 'f', 3).arg(confirm_gate_->threshold(), 0, 'f', 2));
+    stopPlayback();
 }

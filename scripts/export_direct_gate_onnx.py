@@ -27,15 +27,19 @@ class DirectGateExport(nn.Module):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--version", choices=["v3", "v4"], default="v3")
+    args = ap.parse_args()
     torch.set_num_threads(4)
-    st = torch.load(TSE_CODE / "models/pvad_direct_v3/best.pt",
+    st = torch.load(TSE_CODE / f"models/pvad_direct_{args.version}/best.pt",
                     map_location="cpu", weights_only=False)
     model = ConfidenceProjection().eval()
     model.load_state_dict(st["model"])
     wrapper = DirectGateExport(model).eval()
     windows = torch.randn(5, 192)
     reference = torch.randn(192)
-    out = DV / "models/tse_e16/direct_v3.onnx"
+    out = DV / f"models/tse_e16/direct_{args.version}.onnx"
     out.parent.mkdir(parents=True, exist_ok=True)
     with torch.inference_mode():
         expected = wrapper(windows, reference)

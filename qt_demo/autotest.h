@@ -27,3 +27,7 @@ int run_tse_smoke(const std::string& root);
 int run_story_test(const std::string& root, const std::string& tts_model_dir,
                    float story_gain = 0.45f, float mask_thr = 0.5f,
                    bool direct_asr = false);
+
+// 打断快速复核验证（--confirm-test）：v7b 触发后 direct_v4(TH=0.35/UNC=0) 复核，
+// 确认注册用户才停 TTS。三场景：TTS 自回声不停 / 真人 A 打断 / 真人 B 不停。
+int run_confirm_test(const std::string& root, const std::string& tts_model_dir);

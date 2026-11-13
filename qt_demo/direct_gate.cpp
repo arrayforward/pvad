@@ -11,7 +11,7 @@ std::wstring widen_direct(const std::string& s) {
 
 DirectGate::DirectGate(const std::string& model_path, float threshold, float uncertain)
     : threshold_(threshold), uncertain_(uncertain) {
-    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "direct_v3");
+    env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "direct_v4");
     Ort::SessionOptions so;
     so.SetIntraOpNumThreads(1);
     so.SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);

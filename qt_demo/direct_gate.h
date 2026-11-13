@@ -1,4 +1,4 @@
-// direct_gate.h - tse pvad_direct_v3 句级二级复核（ONNX FP32）
+// direct_gate.h - tse pvad_direct 句级二级复核（ONNX FP32，当前 direct_v4 官方点）
 #pragma once
 #include <memory>
 #include <string>
@@ -14,7 +14,7 @@ struct DirectGateDecision {
 
 class DirectGate {
 public:
-    // 高召回工作点：当前域 A 放行约 97%/95.5%，牺牲强拦截以尽量少误杀用户。
+    // 官方工作点 TH=0.23/UNC=0.2；真人 held-out 口径见 docs/REGRESSION.md。
     explicit DirectGate(const std::string& model_path,
                         float threshold = 0.0f, float uncertain = 0.3f);
     ~DirectGate();
@@ -26,6 +26,7 @@ public:
                               const std::vector<float>& reference) const;
     float threshold() const { return threshold_; }
     float uncertain() const { return uncertain_; }
+    void setThreshold(float t) { threshold_ = t; }  // 界面实时调整（确认门）
 private:
     std::unique_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::Session> session_;

@@ -85,6 +85,13 @@ int main(int argc, char** argv) {
 
     if (args.contains("--tse-smoke")) return run_tse_smoke(runtime_root);
 
+    if (args.contains("--confirm-test")) {
+        std::string tts_dir = runtime_tts_dir;
+        int idx = args.indexOf("--tts-model");
+        if (idx >= 0 && idx + 1 < args.size()) tts_dir = args[idx + 1].toStdString();
+        return run_confirm_test(runtime_root, tts_dir);
+    }
+
     if (args.contains("--story-test") || args.contains("--direct-asr-test")) {
         std::string tts_dir = runtime_tts_dir;
         int idx = args.indexOf("--tts-model");

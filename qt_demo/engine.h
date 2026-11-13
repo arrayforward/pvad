@@ -15,7 +15,6 @@
 #include "direct_gate.h"
 #include "enroll_store.h"
 #include "fbank.h"
-#include "pvad_stream.h"
 #include "tts.h"
 #include "vad.h"
 #include "wizard.h"
@@ -43,7 +42,7 @@ public slots:
     void startWizard();                   // 引导注册：备份旧注册并开始 3 段向导
     void cancelWizard();                  // 引导注册：取消并恢复旧注册
     void setDenoiseEnabled(bool on);      // 监听降噪（RNNoise），默认关
-    void setPvadThreshold(double threshold);  // 实时 P(target) 阈值，麦克风/WAV 注入均生效
+    void setPvadThreshold(double threshold);  // 实时打断复核阈值（direct_v4 identity）
     void setAsrEnabled(bool on);          // [仅保留注册用户声音]：VAD 自动分段转写
 
 signals:
@@ -77,10 +76,9 @@ private:
     void handleEvent(const FrameEvent& ev);
     bool ensureTseEmb();            // 给缺 tse_emb 的注册段从 wav 补算，并更新 tse_emb_ 均值；返回是否有补算
     bool ensureDirectRef();         // 二级复核用原始电平 deep-192（懒计算，不改持久化声纹）
-    void finalizeCollect();         // 收集结束：direct_v3 复核 → TSE 提取 → ASR → asrText
+    void finalizeCollect();         // 收集结束：direct_v4 复核 → TSE 提取 → ASR → asrText
     void finishRecord();
     void persistEnrollment();       // 注册状态变化后落盘 enrollment/
-    void refreshStreamEnroll();     // 同步流式 PVAD 的 emb/CMVN 先验
     QString enrollmentDir() const;  // <root>/qt_demo/enrollment
 
     DemoCore core_;
@@ -114,20 +112,26 @@ private:
 
     QTimer* timer_ = nullptr;
     bool interrupt_latched_ = false;      // 本次监听是否已触发过（日志只记首次，之后仍上报数值）
-    // 实时流式 PVAD（chunked GRU state 复用 + EMA CMVN），麦克风路径专用
-    std::unique_ptr<PvadStream> stream_;
-    std::unique_ptr<Vad> vad_;            // silero VAD（长流会话策略的门控/复位依据）
-    PvadGate sgate_{0.5f, 0.2f, 2};       // confirm=2（v7b 默认；v4_stream 时代为 4 压冷启动 blip）
-    std::deque<float> swin_;              // fbank 对齐窗（480 采样）
-    Fbank sfbank_;
-    bool svad_speech_ = false;            // 上一帧 VAD 语音判定
-    int warmup_left_ = 20;                // 会话（分段）起始 warm-up VAD 帧数
+    // v7b 流式 PVAD 已移除（长流自适应失效 + 真人 B 90% 误触发，见 REGRESSION）；
+    // 打断与 P(target) 显示统一由 direct_v4 周期复核提供（1s 滑窗）。
+    std::unique_ptr<Vad> vad_;            // silero VAD（连续转写的收集/结束判定）
+    long last_speech_frame_ = 0;          // 最近 VAD 语音帧（打断复核的静音保护）
 
     // ---- VAD 自动分段转写链（无需 INTERRUPT；打断仅停止 TTS） ----
     std::unique_ptr<TseSpeakerEncoder> tse_enc_;   // 多尺度 4288 编码器
     std::vector<float> tse_emb_;                   // 注册声纹（4288 维均值）
-    std::unique_ptr<DirectGate> direct_gate_;      // v7b 触发后的 direct_v3 句级复核
+    std::unique_ptr<DirectGate> direct_gate_;      // v7b 触发后的 direct_v4 句级复核
     std::vector<float> direct_ref_;                // 原始电平注册 deep-192 均值
+    // ---- 打断快速复核（TTS 播放期间 direct_v4 周期复核，确认注册用户才停）----
+    // 依据（docs/REGRESSION.md barge-in 对照 + confirm-test）：
+    // v7b 对真人 B 90% 误触发、且长流自适应后触发不及时（S2 实测 4.7s 才 fire）；
+    // TTS 回声在真人注册下 identity≈0，v4 不会自我打断（旧 SAPI 注册资产的 0.42~0.61 是假象）。
+    // v4-3s滑窗 @TH=0.35/UNC=0：A 召回 83%、纯 B 误停 30%、延迟 p50 1.83s。
+    std::unique_ptr<DirectGate> confirm_gate_;     // direct_v4 TH=0.35/UNC=0
+    std::deque<float> confirm_buf_;                // 最近 4s post-denoise 音频（复核滑窗来源）
+    long confirm_frame_ = 0;                       // 本次监听已处理帧数（复核调度用）
+    long confirm_next_check_ = 0;                  // 下次复核帧号（播放中每 1s 一次）
+    void runConfirmCheck();                        // 执行一次复核，放行则停 TTS
     std::deque<float> hist_;                       // 监听中 post-denoise 音频环形缓冲（封顶 8s）
     size_t hist_base_frame_ = 0;                   // hist_.front() 对应的绝对帧号
     size_t mic_frame_ = 0;                         // 本次监听已入 hist_ 的绝对帧计数

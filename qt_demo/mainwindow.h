@@ -59,7 +59,7 @@ private:
     QLabel* prob_label_;
     QLabel* gate_label_;
     QDoubleSpinBox* threshold_spin_;
-    // 连续转写（VAD 自动分段，direct_v3+TSE+ASR，仅注册用户声音）
+    // 连续转写（VAD 自动分段，direct_v4+TSE+ASR，仅注册用户声音）
     QCheckBox* asr_box_;
     QLineEdit* asr_edit_;
     QLabel* keep_label_;
